@@ -13,7 +13,7 @@ from android_tool.tools.app_export import (
 
 
 def test_validate_package_name() -> None:
-    assert validate_package_name("com.yoozoo.jgame.global") == "com.yoozoo.jgame.global"
+    assert validate_package_name("com.example.demo") == "com.example.demo"
 
 
 @pytest.mark.parametrize("package", ["com.example;id", "../example", "single", ""])

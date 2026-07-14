@@ -1,104 +1,147 @@
 # Android Dev Tools
 
-一个用于沉淀 Android 开发、调试、诊断小工具的本地工具箱项目。
+面向 Android 开发、调试与问题定位的本地命令行工具箱。它把设备发现、应用查询、
+数据导出等常见操作收敛到一个 CLI 中，并提供稳定的文本和 JSON 输出，便于人工使用、
+脚本调用以及后续工具组合。
 
-## 目录规划
+## 产品特点
+
+- **快速**：优先直接访问本机 ADB Server，避免反复启动外部进程。
+- **统一**：所有能力通过 `android-tool <command>` 调用，设备选择规则保持一致。
+- **可组合**：命令支持 JSON 输出，可作为自动化脚本和诊断流水线的数据源。
+- **可审计**：数据导出包含来源、大小、状态和文件名映射清单。
+- **本地优先**：不上传设备信息、APK 或应用数据。
+
+## 已实现工具
+
+| 命令 | 用途 | 状态 |
+| --- | --- | --- |
+| `emulator-probe` | 查询 ADB 设备，或并发扫描本地模拟器端口 | 可用 |
+| `app-list` | 列出已安装应用、包名和 APK 路径 | 可用 |
+| `app-export` | 按包名导出 APK、私有数据和标准外部数据 | 可用 |
+| `adb-connect` | 连接、断开或检查 ADB 目标 | 可用 |
+| `app-inspect` | 查询版本、UID、权限、组件和安装信息 | 可用 |
+| `app-log` | 按包名或 PID 收集 logcat | 可用 |
+| `app-control` | 启动、停止、重启、清缓存或清数据 | 可用 |
+| `apk-install` | 安装、覆盖、降级或卸载 APK | 可用 |
+
+## 快速开始
+
+环境要求：Python 3.10 或更高版本，以及可用的 ADB Server。首次开发安装：
+
+```powershell
+python -m pip install -e .
+android-tool --help
+```
+
+不安装命令入口时，可以在当前 PowerShell 会话中临时指定源码目录：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m android_tool --help
+```
+
+### 1. 发现设备
+
+默认直接查询 ADB Server，效果等同于 `adb devices -l`：
+
+```powershell
+android-tool emulator-probe
+android-tool emulator-probe --json
+```
+
+需要发现尚未注册到 ADB 的本地模拟器服务时，显式启用端口扫描：
+
+```powershell
+android-tool emulator-probe --scan --start 5554 --end 5682 --timeout 0.2
+```
+
+### 2. 查询应用
+
+```powershell
+android-tool app-list
+android-tool app-list --third-party
+android-tool app-list --system --include-path
+android-tool app-list --serial emulator-5554 --json
+```
+
+只有一个在线设备时会自动选择；存在多个在线设备时必须使用 `--serial`，避免操作
+错误的目标。
+
+### 3. 导出应用数据
+
+使用中性示例包名导出 APK 和可访问的应用数据：
+
+```powershell
+android-tool app-export com.example.demo
+```
+
+指定设备、输出目录或覆盖已有结果：
+
+```powershell
+android-tool app-export com.example.demo --serial emulator-5554
+android-tool app-export com.example.demo --output D:\android-exports
+android-tool app-export com.example.demo --overwrite
+```
+
+默认输出目录为：
+
+```text
+exports/com.example.demo/
+├─ apk/                          # base APK 和 split APK
+├─ data/                         # 凭据加密和设备加密私有数据
+├─ external/                     # Android/data、media、obb 等外部数据
+├─ metadata/                     # package 信息和路径映射
+└─ export-manifest.json          # 来源、大小和导出状态
+```
+
+私有目录需要设备 root 权限，或应用允许 `run-as`。Android 允许但 Windows 不支持的
+文件名会进行可逆编码，映射记录在 `metadata/path-map.json`。
+
+## 后续规划
+
+下一阶段继续补齐更完整的日常调试闭环。
+
+| 优先级 | 计划命令 | 核心能力 |
+| --- | --- | --- |
+| P1 | `app-restore` | 将 `app-export` 结果恢复到兼容设备 |
+| P1 | `screen` | 截图、录屏、坐标点击、滑动和文本输入 |
+| P1 | `performance` | 汇总 CPU、内存、启动耗时、帧率和耗电信息 |
+| P1 | `file-transfer` | 在设备与本地之间浏览、上传和下载文件 |
+| P2 | `network-debug` | 管理代理、端口转发、反向代理和网络诊断 |
+| P2 | `diagnostic-report` | 汇总设备信息、日志、进程和 bugreport，生成诊断包 |
+
+推荐下一项实现 `adb-connect`。它可以直接消费 `emulator-probe` 的
+`connect_target`，让设备发现结果立即进入可用连接状态。
+
+## 项目结构
 
 ```text
 android-tool/
 ├─ src/android_tool/
 │  ├─ cli.py                     # 统一命令入口
-│  ├─ core/                      # 通用能力：端口、ADB 可执行文件和输出解析
+│  ├─ core/                      # ADB、网络和通用能力
 │  └─ tools/                     # 独立工具模块
-│     ├─ emulator_probe.py       # 本地模拟器服务探测
-│     ├─ app_list.py             # 已安装应用包列表
-│     └─ app_export.py           # 按包名导出 APK 和应用数据
 ├─ tests/                        # 单元测试
-├─ docs/                         # 工具设计、使用说明、排障记录
+├─ docs/                         # 设计、使用说明和排障记录
 ├─ scripts/                      # 本地开发脚本
 ├─ exports/                      # 本地导出结果（Git 忽略）
 └─ pyproject.toml                # Python 包和 CLI 配置
 ```
 
-## 第一个工具：本地模拟器服务探测
+## 安全边界
 
-默认直接查询本机 ADB Server，效果等同于 `adb devices -l`，通常可以立即得到
-ADB 已知的模拟器和真机，并为本地模拟器生成下一步可用的 `connect_target`。
-如果 ADB Server 尚未运行，工具会查找并执行 `adb devices -l` 来启动它。
+- 仅对你拥有或获准调试的设备和应用执行操作。
+- 导出结果可能包含账号、令牌、数据库等敏感信息，`exports/` 已默认加入 Git 忽略。
+- `--overwrite`、清理数据和未来的恢复命令属于破坏性操作，应在执行前确认目标设备、
+  包名和备份状态。
 
-运行：
-
-```powershell
-python -m android_tool emulator-probe
-```
-
-只输出 JSON，方便后续给 adb 连接工具复用：
-
-```powershell
-python -m android_tool emulator-probe --json
-```
-
-ADB 不可用或需要发现尚未注册到 ADB 的服务时，可显式启用并发端口扫描。
-Android Emulator 常见端口规律：
-
-- 偶数端口是 emulator console，例如 `5554`
-- 后一个奇数端口是 adb 端口，例如 `5555`
-- 一组本地模拟器通常表现为 `127.0.0.1:5554/5555`
-
-指定范围：
-
-```powershell
-python -m android_tool emulator-probe --scan --start 5554 --end 5682 --timeout 0.2
-```
-
-ADB 列表输出中的 `connect_target`，或扫描输出中的 `adb_connect_target`，
-可以作为下一步 `adb connect` 的目标，例如：
-
-```powershell
-adb connect 127.0.0.1:5555
-```
-
-## 第二个工具：已安装应用列表
-
-自动选择唯一在线设备，列出已安装应用的包名：
-
-```powershell
-python -m android_tool app-list
-```
-
-常用筛选和结构化输出：
-
-```powershell
-python -m android_tool app-list --third-party
-python -m android_tool app-list --system --include-path
-python -m android_tool app-list --serial emulator-5554 --json
-```
-
-有多个在线设备时必须通过 `--serial` 指定目标，避免查询错误的设备。
-
-## 第三个工具：应用数据导出
-
-根据包名导出 APK、私有数据和标准外部数据目录。默认写入 `exports/`，
-最终目录名固定为包名：
-
-```powershell
-python -m android_tool app-export com.yoozoo.jgame.global
-```
-
-指定设备、输出位置或覆盖已有目录：
-
-```powershell
-python -m android_tool app-export com.yoozoo.jgame.global --serial emulator-5554
-python -m android_tool app-export com.yoozoo.jgame.global --output D:\android-exports
-python -m android_tool app-export com.yoozoo.jgame.global --overwrite
-```
-
-私有目录需要模拟器 root 权限，或应用本身允许 `run-as`。每次导出都会生成
-`export-manifest.json`，记录实际导出的来源、大小和失败信息。
-
-## 开发
+## 开发与验证
 
 ```powershell
 python -m pip install -e .
 python -m pytest
 ```
+
+新增工具时应保持三个约定：复用统一设备选择、同时考虑文本和 JSON 输出、为命令解析
+与核心行为添加测试。

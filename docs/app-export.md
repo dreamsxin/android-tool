@@ -14,15 +14,15 @@
 Android 权限模型不允许读取私有数据，工具仍会导出 APK 和可访问的外部数据。
 
 ```powershell
-python -m android_tool app-export com.yoozoo.jgame.global
+python -m android_tool app-export com.example.demo
 ```
 
-默认输出为 `exports/com.yoozoo.jgame.global/`。
+默认输出为 `exports/com.example.demo/`。
 
 指定设备和输出父目录：
 
 ```powershell
-python -m android_tool app-export com.yoozoo.jgame.global `
+python -m android_tool app-export com.example.demo `
   --serial emulator-5554 `
   --output D:\android-exports
 ```

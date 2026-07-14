@@ -35,6 +35,34 @@ class AdbStreamResult:
 
 
 @dataclass(frozen=True)
+class AdbShellResult:
+    """Result of a non-streaming ADB shell-v2 command."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+@dataclass(frozen=True)
+class AdbCommandResult:
+    """Result of invoking the ADB executable."""
+
+    args: list[str]
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+@dataclass(frozen=True)
+class AdbHostActionResult:
+    """Result returned by an ADB host service action."""
+
+    action: str
+    target: str
+    message: str
+
+
+@dataclass(frozen=True)
 class AdbDevice:
     """One row returned by ``adb devices -l``."""
 
@@ -151,6 +179,28 @@ def _read_adb_status(connection: socket.socket, operation: str) -> None:
     raise AdbServerError(f"unexpected ADB server response during {operation}: {status!r}")
 
 
+def _read_optional_adb_payload(connection: socket.socket) -> str:
+    previous_timeout = connection.gettimeout()
+    connection.settimeout(0.2)
+    try:
+        try:
+            length_bytes = connection.recv(4)
+        except socket.timeout:
+            return ""
+        if not length_bytes:
+            return ""
+        if len(length_bytes) < 4:
+            length_bytes += _receive_exact(connection, 4 - len(length_bytes))
+        response_length = int(length_bytes, 16)
+        if response_length <= 0:
+            return ""
+        return _receive_exact(connection, response_length).decode("utf-8", errors="replace")
+    except (OSError, ValueError) as exc:
+        raise AdbServerError("could not read ADB server response payload") from exc
+    finally:
+        connection.settimeout(previous_timeout)
+
+
 def query_adb_server(
     host: str = "127.0.0.1",
     port: int | None = None,
@@ -171,6 +221,34 @@ def query_adb_server(
         raise AdbServerError(f"could not query ADB server at {host}:{server_port}") from exc
 
     return parse_adb_devices(response)
+
+
+def execute_adb_host_action(
+    action: str,
+    target: str,
+    host: str = "127.0.0.1",
+    port: int | None = None,
+    timeout_seconds: float = 5.0,
+) -> AdbHostActionResult:
+    """Execute a simple ADB host action, such as connect or disconnect."""
+    if action not in {"connect", "disconnect"}:
+        raise ValueError(f"unsupported ADB host action: {action}")
+    if not target:
+        raise ValueError("target must not be empty")
+
+    server_port = port or int(os.environ.get("ANDROID_ADB_SERVER_PORT", "5037"))
+    request = f"host:{action}:{target}"
+    try:
+        with socket.create_connection((host, server_port), timeout_seconds) as connection:
+            _send_adb_request(connection, request)
+            _read_adb_status(connection, f"{action} {target}")
+            message = _read_optional_adb_payload(connection)
+    except AdbServerError:
+        raise
+    except OSError as exc:
+        raise AdbServerError(f"could not {action} {target} via ADB server") from exc
+
+    return AdbHostActionResult(action=action, target=target, message=message.strip())
 
 
 def execute_adb_shell(
@@ -201,6 +279,36 @@ def execute_adb_shell(
         raise AdbServerError(f"could not execute shell command on {serial}: {exc}") from exc
 
     return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def execute_adb_shell_v2(
+    serial: str,
+    arguments: list[str],
+    host: str = "127.0.0.1",
+    port: int | None = None,
+    timeout_seconds: float = 10.0,
+) -> AdbShellResult:
+    """Execute a shell-v2 command and retain stdout, stderr, and exit status."""
+    stdout = bytearray()
+
+    class _BytearrayWriter:
+        def write(self, payload: bytes) -> int:
+            stdout.extend(payload)
+            return len(payload)
+
+    result = stream_adb_shell(
+        serial=serial,
+        arguments=arguments,
+        destination=_BytearrayWriter(),
+        host=host,
+        port=port,
+        timeout_seconds=timeout_seconds,
+    )
+    return AdbShellResult(
+        exit_code=result.exit_code,
+        stdout=bytes(stdout).decode("utf-8", errors="replace"),
+        stderr=result.stderr,
+    )
 
 
 def stream_adb_shell(
@@ -287,3 +395,41 @@ def list_adb_devices(adb_path: str | None = None, timeout_seconds: float = 3.0) 
         message = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
         raise AdbError(f"adb devices failed: {message}")
     return parse_adb_devices(completed.stdout)
+
+
+def execute_adb_command(
+    arguments: list[str],
+    serial: str | None = None,
+    adb_path: str | None = None,
+    timeout_seconds: float = 60.0,
+) -> AdbCommandResult:
+    """Invoke the ADB executable for operations not covered by simple host services."""
+    if not arguments:
+        raise ValueError("arguments must not be empty")
+
+    executable = adb_path or find_adb_executable()
+    command = [executable]
+    if serial:
+        command.extend(["-s", serial])
+    command.extend(arguments)
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AdbError(
+            f"adb {' '.join(arguments)} timed out after {timeout_seconds:g} seconds"
+        ) from exc
+    except OSError as exc:
+        raise AdbError(f"failed to run adb: {exc}") from exc
+
+    return AdbCommandResult(
+        args=command,
+        exit_code=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
