@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Sequence
 
 from android_tool.core.adb import AdbError, list_adb_devices
 from android_tool.tools.app_list import AppListError, list_installed_packages
+from android_tool.tools.app_export import AppExportError, export_app_data
 from android_tool.tools.emulator_probe import ProbeOptions, probe_emulators
 
 
@@ -55,6 +57,27 @@ def build_parser() -> argparse.ArgumentParser:
     app_list.add_argument("--include-path", action="store_true", help="Include each APK path.")
     app_list.add_argument("--timeout", type=float, default=10.0, help="ADB timeout in seconds.")
     app_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    app_export = subparsers.add_parser(
+        "app-export",
+        help="Export an installed package's APKs and application data.",
+    )
+    app_export.add_argument("package", help="Android package name to export.")
+    app_export.add_argument("--serial", help="ADB device serial; required when several are online.")
+    app_export.add_argument(
+        "--output",
+        default="exports",
+        help="Parent output directory; a package-named directory is created inside it.",
+    )
+    app_export.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing package output directory.",
+    )
+    app_export.add_argument(
+        "--timeout", type=float, default=30.0, help="ADB inactivity timeout in seconds."
+    )
+    app_export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     return parser
 
@@ -139,6 +162,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         for package in result.packages:
             path = f" path={package.apk_path}" if package.apk_path else ""
             print(f"- {package.package_name}{path}")
+        return 0
+
+    if args.command == "app-export":
+        last_reported: dict[str, int] = {}
+
+        def report_progress(kind: str, transferred: int, expected: int) -> None:
+            previous = last_reported.get(kind, 0)
+            if transferred - previous < 64 * 1024 * 1024 and transferred < expected:
+                return
+            last_reported[kind] = transferred
+            percent = min(100, int(transferred * 100 / expected)) if expected else 0
+            print(
+                f"Exporting {kind}: {transferred / 1024 / 1024:.1f} MiB ({percent}%)",
+                file=sys.stderr,
+            )
+
+        try:
+            result = export_app_data(
+                package_name=args.package,
+                output_base=args.output,
+                serial=args.serial,
+                overwrite=args.overwrite,
+                timeout_seconds=args.timeout,
+                progress=report_progress,
+            )
+        except (AdbError, AppExportError) as exc:
+            parser.exit(2, f"error: {exc}\n")
+
+        if args.json:
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            return 0
+
+        print(f"Exported {args.package} from {result.device.serial}")
+        print(f"Output: {result.output_directory}")
+        print(f"Sources: {len(result.entries)}, estimated bytes: {result.estimated_bytes}")
         return 0
 
     parser.error(f"Unsupported command: {args.command}")

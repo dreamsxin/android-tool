@@ -11,10 +11,12 @@ android-tool/
 │  ├─ core/                      # 通用能力：端口、ADB 可执行文件和输出解析
 │  └─ tools/                     # 独立工具模块
 │     ├─ emulator_probe.py       # 本地模拟器服务探测
-│     └─ app_list.py             # 已安装应用包列表
+│     ├─ app_list.py             # 已安装应用包列表
+│     └─ app_export.py           # 按包名导出 APK 和应用数据
 ├─ tests/                        # 单元测试
 ├─ docs/                         # 工具设计、使用说明、排障记录
 ├─ scripts/                      # 本地开发脚本
+├─ exports/                      # 本地导出结果（Git 忽略）
 └─ pyproject.toml                # Python 包和 CLI 配置
 ```
 
@@ -73,6 +75,26 @@ python -m android_tool app-list --serial emulator-5554 --json
 ```
 
 有多个在线设备时必须通过 `--serial` 指定目标，避免查询错误的设备。
+
+## 第三个工具：应用数据导出
+
+根据包名导出 APK、私有数据和标准外部数据目录。默认写入 `exports/`，
+最终目录名固定为包名：
+
+```powershell
+python -m android_tool app-export com.yoozoo.jgame.global
+```
+
+指定设备、输出位置或覆盖已有目录：
+
+```powershell
+python -m android_tool app-export com.yoozoo.jgame.global --serial emulator-5554
+python -m android_tool app-export com.yoozoo.jgame.global --output D:\android-exports
+python -m android_tool app-export com.yoozoo.jgame.global --overwrite
+```
+
+私有目录需要模拟器 root 权限，或应用本身允许 `run-as`。每次导出都会生成
+`export-manifest.json`，记录实际导出的来源、大小和失败信息。
 
 ## 开发
 

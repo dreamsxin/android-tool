@@ -6,9 +6,11 @@ import os
 import shlex
 import shutil
 import socket
+import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, Callable
 
 
 class AdbError(RuntimeError):
@@ -21,6 +23,15 @@ class AdbNotFoundError(AdbError):
 
 class AdbServerError(AdbError):
     """Raised when the local ADB server cannot answer a request."""
+
+
+@dataclass(frozen=True)
+class AdbStreamResult:
+    """Result of a streamed ADB shell-v2 command."""
+
+    exit_code: int
+    stderr: str
+    bytes_written: int
 
 
 @dataclass(frozen=True)
@@ -190,6 +201,65 @@ def execute_adb_shell(
         raise AdbServerError(f"could not execute shell command on {serial}: {exc}") from exc
 
     return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def stream_adb_shell(
+    serial: str,
+    arguments: list[str],
+    destination: BinaryIO,
+    host: str = "127.0.0.1",
+    port: int | None = None,
+    timeout_seconds: float = 30.0,
+    progress: Callable[[int], None] | None = None,
+) -> AdbStreamResult:
+    """Stream stdout from a shell-v2 command while retaining exit status and stderr."""
+    if not arguments:
+        raise ValueError("arguments must not be empty")
+
+    server_port = port or int(os.environ.get("ANDROID_ADB_SERVER_PORT", "5037"))
+    command = shlex.join(arguments)
+    bytes_written = 0
+    stderr_chunks: list[bytes] = []
+    exit_code: int | None = None
+
+    try:
+        with socket.create_connection((host, server_port), timeout_seconds) as connection:
+            _send_adb_request(connection, f"host:transport:{serial}")
+            _read_adb_status(connection, f"device selection for {serial}")
+            _send_adb_request(connection, f"shell,v2,raw:{command}")
+            _read_adb_status(connection, command)
+
+            while True:
+                header = connection.recv(5)
+                if not header:
+                    break
+                if len(header) < 5:
+                    header += _receive_exact(connection, 5 - len(header))
+                stream_id = header[0]
+                payload_length = struct.unpack("<I", header[1:])[0]
+                payload = _receive_exact(connection, payload_length)
+
+                if stream_id == 1:
+                    destination.write(payload)
+                    bytes_written += len(payload)
+                    if progress:
+                        progress(bytes_written)
+                elif stream_id == 2:
+                    stderr_chunks.append(payload)
+                elif stream_id == 3:
+                    exit_code = payload[0] if payload else 0
+    except AdbServerError:
+        raise
+    except OSError as exc:
+        raise AdbServerError(f"could not stream shell command on {serial}: {exc}") from exc
+
+    if exit_code is None:
+        raise AdbServerError(f"ADB shell command ended without an exit status: {command}")
+    return AdbStreamResult(
+        exit_code=exit_code,
+        stderr=b"".join(stderr_chunks).decode("utf-8", errors="replace").strip(),
+        bytes_written=bytes_written,
+    )
 
 
 def list_adb_devices(adb_path: str | None = None, timeout_seconds: float = 3.0) -> list[AdbDevice]:
