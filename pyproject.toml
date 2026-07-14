@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "android-dev-tools"
+version = "0.1.0"
+description = "A local toolbox for Android development and debugging workflows."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Android Tool Maintainers" }
+]
+dependencies = []
+
+[project.scripts]
+android-tool = "android_tool.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
