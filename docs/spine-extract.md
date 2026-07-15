@@ -47,6 +47,10 @@ Spine bundle：
 - 存在 `.atlas`
 - 存在同名 `.skel`、`.json` 或 `.bytes`
 
+扫描范围包含 `apk/assets/res`、OBB 和 upgrade 数据。APK 作为最低优先级基础资源层；同一
+逻辑路径在 OBB 或 upgrade 中存在时，APK 版本仍会保留在导出目录中用于审计，但不会重复
+加入播放器索引。
+
 匹配到的 bundle 会按原始相对路径输出，但只复制 `.atlas`、匹配的骨骼文件，以及 atlas
 实际引用的贴图页。输出根目录会写入 `spine-manifest.json`，记录源路径、目标路径、
 bundle 数量、文件数量和每个 bundle 内的 atlas、骨骼文件、图片文件。

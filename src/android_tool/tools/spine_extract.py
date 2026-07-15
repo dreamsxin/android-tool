@@ -10,7 +10,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from android_tool.tools.app_export import validate_package_name
 from android_tool.tools.uf_extract import UfExtractError, decode_uf_texture_to_png
@@ -88,7 +88,6 @@ def discover_spine_bundle_directories(
     # os.walk keeps the scan in the directory tree and avoids constructing a
     # Path object for every unrelated file in large APK/OBB exports.
     for root, directories, filenames in os.walk(source_directory):
-        directories[:] = [directory for directory in directories if directory != "apk"]
         root_path = Path(root)
         for filename in filenames:
             processed_files += 1
@@ -310,6 +309,21 @@ def _build_spine_index_entries(
                     "file_count": 2 + len(image_files),
                 }
             )
+    non_apk_logical_paths = {
+        logical_path
+        for entry in entries
+        if not _is_apk_entry(entry)
+        if (logical_path := _entry_logical_path(entry)) is not None
+    }
+    entries = [
+        entry
+        for entry in entries
+        if not (
+            _is_apk_entry(entry)
+            and (logical_path := _entry_logical_path(entry)) is not None
+            and logical_path in non_apk_logical_paths
+        )
+    ]
     entries.sort(
         key=lambda entry: (
             str(entry["relative_directory"]).casefold(),
@@ -317,6 +331,24 @@ def _build_spine_index_entries(
         )
     )
     return [{"id": index, **entry} for index, entry in enumerate(entries)]
+
+
+def _is_apk_entry(entry: dict[str, object]) -> bool:
+    parts = PurePosixPath(str(entry["relative_directory"])).parts
+    return bool(parts) and parts[0].casefold() == "apk"
+
+
+def _entry_logical_path(entry: dict[str, object]) -> str | None:
+    skeleton_files = entry["skeleton_files"]
+    if not isinstance(skeleton_files, list) or not skeleton_files:
+        return None
+    resource_path = PurePosixPath(str(entry["relative_directory"])) / str(skeleton_files[0])
+    parts = resource_path.parts
+    try:
+        res_index = next(index for index, part in enumerate(parts) if part.casefold() == "res")
+    except StopIteration:
+        return None
+    return "/".join(part.casefold() for part in parts[res_index + 1 :])
 
 
 def extract_spine_bundles(
@@ -405,7 +437,9 @@ def extract_spine_bundles(
         "bundles": [bundle.to_dict() for bundle in completed_bundles],
         "notes": [
             "A Spine bundle is detected by a .atlas file with a sibling .skel, .json, or .bytes file.",
+            "APK assets are extracted as the base resource layer.",
             "Upgrade-only skeletons reuse atlas and texture files from the same logical OBB path.",
+            "APK index entries are omitted when the same logical skeleton exists in OBB or upgrade data.",
             "Only atlas files, matching skeletons, and atlas-referenced texture pages are copied.",
             "Referenced UF 00 02 textures are decoded to standard PNG files during extraction.",
         ],

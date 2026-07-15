@@ -141,3 +141,47 @@ def test_upgrade_skeleton_reuses_matching_obb_atlas(tmp_path: Path) -> None:
     index = json.loads((result.output_directory / "spine-index.json").read_text())
     assert index["bundle_count"] == 2
     assert any("/upgrade/" in entry["relative_directory"] for entry in index["bundles"])
+
+
+def test_apk_spine_assets_are_extracted_without_indexing_overridden_resources(
+    tmp_path: Path,
+) -> None:
+    package_name = "com.example.demo"
+    source_base = tmp_path / "exports"
+    output_base = tmp_path / "spine_exports"
+    package_root = source_base / package_name
+    apk_res = package_root / "apk" / "assets" / "res"
+    obb_res = package_root / "data" / "files" / "obb" / "res"
+
+    unique_apk = apk_res / "common" / "effect_spine" / "apk_only"
+    _write_file(unique_apk / "apk_only.atlas", b"apk_only.png\nsize: 64,64\n")
+    _write_file(unique_apk / "apk_only.skel", b"apk-only-skeleton")
+    decoded_png = b"\x89PNG\r\n\x1a\n" + b"apk-texture"
+    _write_file(unique_apk / "apk_only.png", _encode_uf02(decoded_png))
+
+    apk_duplicate = apk_res / "common" / "knight_spine" / "1001"
+    _write_file(apk_duplicate / "1001.atlas", b"1001.png\nsize: 64,64\n")
+    _write_file(apk_duplicate / "1001.skel", b"old-apk-skeleton")
+    _write_file(apk_duplicate / "1001.png", b"old-texture")
+
+    obb_duplicate = obb_res / "common" / "knight_spine" / "1001"
+    _write_file(obb_duplicate / "1001.atlas", b"1001.png\nsize: 64,64\n")
+    _write_file(obb_duplicate / "1001.skel", b"new-obb-skeleton")
+    _write_file(obb_duplicate / "1001.png", b"new-texture")
+
+    result = extract_spine_bundles(
+        package_name,
+        source_base=source_base,
+        output_base=output_base,
+    )
+
+    extracted_apk = result.output_directory / "apk" / "assets" / "res"
+    assert result.bundle_count == 3
+    assert (extracted_apk / "common/effect_spine/apk_only/apk_only.png").read_bytes() == decoded_png
+    assert (extracted_apk / "common/knight_spine/1001/1001.skel").is_file()
+    index = json.loads((result.output_directory / "spine-index.json").read_text())
+    assert index["bundle_count"] == 2
+    assert {entry["name"] for entry in index["bundles"]} == {"1001", "apk_only"}
+    role_entries = [entry for entry in index["bundles"] if entry["name"] == "1001"]
+    assert len(role_entries) == 1
+    assert "/obb/" in role_entries[0]["relative_directory"]
