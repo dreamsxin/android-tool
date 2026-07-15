@@ -11,7 +11,10 @@ requires-python = ">=3.10"
 authors = [
   { name = "Android Tool Maintainers" }
 ]
-dependencies = []
+dependencies = [
+  "Pillow>=10",
+  "texture2ddecoder>=1.0.6",
+]
 
 [project.scripts]
 android-tool = "android_tool.cli:main"

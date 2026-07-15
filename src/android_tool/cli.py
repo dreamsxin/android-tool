@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from android_tool.core.adb import AdbError, list_adb_devices
 from android_tool.tools.adb_connect import AdbConnectError, adb_connect
@@ -17,6 +18,7 @@ from android_tool.tools.app_export import AppExportError, export_app_data
 from android_tool.tools.apk_install import ApkInstallError, install_apks, uninstall_package
 from android_tool.tools.emulator_probe import ProbeOptions, probe_emulators
 from android_tool.tools.spine_extract import SpineExtractError, extract_spine_bundles
+from android_tool.tools.uf_extract import UfExtractError, extract_uf_resources
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -105,7 +107,44 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace an existing package output directory.",
     )
+    spine_extract.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress scan and copy progress and only print the final result.",
+    )
     spine_extract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    uf_extract = subparsers.add_parser(
+        "uf-extract",
+        help="Decode UF 00 02 resources from an app-export result.",
+    )
+    uf_extract.add_argument("package", help="Android package name already exported under --source.")
+    uf_extract.add_argument(
+        "--source",
+        default="exports",
+        help="Parent directory containing the package export.",
+    )
+    uf_extract.add_argument(
+        "--output",
+        default="uf_exports",
+        help="Parent output directory; a package-named directory is created inside it.",
+    )
+    uf_extract.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing decoded files already present in the output tree.",
+    )
+    uf_extract.add_argument(
+        "--png",
+        action="store_true",
+        help="Convert this game's ETC2 RGBA PVR textures to PNG.",
+    )
+    uf_extract.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress scan progress and only print the final result.",
+    )
+    uf_extract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     adb_connect_parser = subparsers.add_parser(
         "adb-connect",
@@ -327,12 +366,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "spine-extract":
+        def report_spine_progress(
+            stage: str, current: int, total: int, current_path: Path
+        ) -> None:
+            if stage == "scan":
+                print(
+                    f"Scanned {current:,} files; found {total:,} Spine bundles; current={current_path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif stage == "filter":
+                print(
+                    f"Filtered {current:,} candidates; selected {total:,}; current={current_path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Copying Spine bundle {current:,}/{total:,}: {current_path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
         try:
             result = extract_spine_bundles(
                 package_name=args.package,
                 source_base=args.source,
                 output_base=args.output,
                 overwrite=args.overwrite,
+                progress_callback=None if args.quiet else report_spine_progress,
             )
         except (AppExportError, SpineExtractError, OSError) as exc:
             parser.exit(2, f"error: {exc}\n")
@@ -344,6 +406,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Extracted Spine bundles for {result.package_name}")
         print(f"Output: {result.output_directory}")
         print(f"Bundles: {result.bundle_count}, files: {result.file_count}")
+        return 0
+
+    if args.command == "uf-extract":
+        def report_progress(processed: int, decoded: int, current_path: Path) -> None:
+            if processed == 0:
+                print(f"Scanning {args.source}/{args.package} ...", file=sys.stderr, flush=True)
+                return
+            print(
+                f"Scanned {processed:,} files; decoded {decoded:,} UF resources; "
+                f"current={current_path}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        try:
+            result = extract_uf_resources(
+                package_name=args.package,
+                source_base=args.source,
+                output_base=args.output,
+                overwrite=args.overwrite,
+                png=args.png,
+                progress_callback=None if args.quiet else report_progress,
+            )
+        except (UfExtractError, OSError) as exc:
+            parser.exit(2, f"error: {exc}\n")
+
+        if args.json:
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            return 0
+
+        print(f"Decoded UF resources for {result.package_name}")
+        print(f"Output: {result.output_directory}")
+        print(f"Resources: {result.resource_count}")
         return 0
 
     if args.command == "adb-connect":

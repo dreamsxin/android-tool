@@ -20,6 +20,8 @@
 | `app-list` | 列出已安装应用、包名和 APK 路径 | 可用 |
 | `app-export` | 按包名导出 APK、私有数据和标准外部数据 | 可用 |
 | `spine-extract` | 从导出结果中提取 Spine 动画资源 | 可用 |
+| `uf-extract` | 解封 UF 00 02 资源，并将 ETC2 贴图转为 PNG | 可用 |
+| `spine-player` | 在浏览器中验证 Spine 3.8 资源和动画 | 可用 |
 | `adb-connect` | 连接、断开或检查 ADB 目标 | 可用 |
 | `app-inspect` | 查询版本、UID、权限、组件和安装信息 | 可用 |
 | `app-log` | 按包名或 PID 收集 logcat | 可用 |
@@ -109,7 +111,38 @@ android-tool spine-extract com.yoozoo.jgame.global
 
 默认读取 `exports/com.yoozoo.jgame.global/`，输出到
 `spine_exports/com.yoozoo.jgame.global/`。重复提取时添加 `--overwrite`。输出目录会保留
-原始相对路径，并写入 `spine-manifest.json` 方便审计。
+原始相对路径，将 atlas 引用的 `UF 00 02` 贴图直接转换为标准 PNG，并写入
+`spine-manifest.json` 方便审计，同时生成 `spine-index.json` 供播放器快速列出动画目录。
+
+扫描大型导出目录时会显示扫描文件数、发现的 Spine bundle 数和复制进度；使用
+`--quiet` 可以关闭进度，只保留最终摘要。
+
+提取完成后启动 Spine 3.8 播放器：
+
+```powershell
+cd spine-player
+npm install --ignore-scripts
+npm run dev
+```
+
+播放器读取上面的 `spine-index.json`，左侧直接列出所有动画目录；点击目录后加载其中的
+skeleton、贴图和动作，可切换动作、循环状态、时间轴、速度和显示缩放。
+`spine-extract` 会自动将 atlas 引用的 `UF 00 02` 贴图转换为标准 PNG，因此 Spine 播放器
+不需要再执行 `uf-extract`。如果需要解封整个应用中的所有 UF 资源，再使用：
+
+```powershell
+android-tool uf-extract com.yoozoo.jgame.global --png --overwrite
+```
+
+`uf-extract` 默认输出到 `uf_exports/com.yoozoo.jgame.global/`。`--png` 会把 UF -> CCZ
+-> PVR 链路中的 ETC2 RGBA 贴图转换为标准 PNG；需要安装可选依赖：
+
+```powershell
+python -m pip install texture2ddecoder Pillow
+```
+
+扫描大型导出目录时，命令默认会在 stderr 显示扫描文件数和已解封资源数；需要只保留最终
+摘要时使用 `--quiet`。使用 `--json` 时进度仍写入 stderr，不会污染 JSON 输出。
 
 ## 后续规划
 
