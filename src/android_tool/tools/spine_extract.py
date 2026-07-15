@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -20,7 +20,7 @@ class SpineExtractError(RuntimeError):
     """Raised when Spine bundles cannot be discovered or copied."""
 
 
-SKELETON_EXTENSIONS = {".skel", ".json", ".bytes"}
+SKELETON_EXTENSIONS = (".skel", ".json", ".bytes")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
@@ -179,18 +179,7 @@ def _extract_one_bundle(
         source_file = bundle_directory / Path(relative_file)
         target_file = target_directory / Path(relative_file)
         target_file.parent.mkdir(parents=True, exist_ok=True)
-        if relative_file in image_files:
-            with source_file.open("rb") as handle:
-                header = handle.read(4)
-            if header == b"UF\x00\x02":
-                try:
-                    decode_uf_texture_to_png(source_file.read_bytes(), target_file)
-                except UfExtractError as exc:
-                    raise SpineExtractError(
-                        f"could not decode Spine texture {source_file}: {exc}"
-                    ) from exc
-                continue
-        shutil.copy2(source_file, target_file)
+        _copy_spine_file(source_file, target_file, relative_file in image_files)
     return SpineBundle(
         relative_directory=relative_directory.as_posix(),
         atlas_files=atlas_files,
@@ -198,6 +187,136 @@ def _extract_one_bundle(
         image_files=image_files,
         file_count=file_count,
     )
+
+
+def _copy_spine_file(source_file: Path, target_file: Path, is_image: bool) -> None:
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    if is_image:
+        with source_file.open("rb") as handle:
+            header = handle.read(4)
+        if header == b"UF\x00\x02":
+            try:
+                decode_uf_texture_to_png(source_file.read_bytes(), target_file)
+            except UfExtractError as exc:
+                raise SpineExtractError(
+                    f"could not decode Spine texture {source_file}: {exc}"
+                ) from exc
+            return
+    shutil.copy2(source_file, target_file)
+
+
+def _fallback_obb_atlas(
+    source_directory: Path,
+    skeleton_path: Path,
+) -> Path | None:
+    relative_path = skeleton_path.relative_to(source_directory)
+    parts = list(relative_path.parts)
+    try:
+        upgrade_index = next(
+            index for index, part in enumerate(parts) if part.casefold() == "upgrade"
+        )
+    except StopIteration:
+        return None
+    parts[upgrade_index] = "obb"
+    candidate = (source_directory / Path(*parts)).with_suffix(".atlas")
+    return candidate if candidate.is_file() else None
+
+
+def _discover_upgrade_overlay_skeletons(
+    source_directory: Path,
+) -> list[tuple[Path, Path]]:
+    overlays: list[tuple[Path, Path]] = []
+    for root, directories, filenames in os.walk(source_directory):
+        directories[:] = [directory for directory in directories if directory != "apk"]
+        root_path = Path(root)
+        for filename in filenames:
+            skeleton_path = root_path / filename
+            if skeleton_path.suffix.casefold() not in SKELETON_EXTENSIONS:
+                continue
+            if skeleton_path.with_suffix(".atlas").is_file():
+                continue
+            fallback_atlas = _fallback_obb_atlas(source_directory, skeleton_path)
+            if fallback_atlas is not None:
+                overlays.append((skeleton_path, fallback_atlas))
+    return sorted(overlays, key=lambda item: item[0].as_posix().casefold())
+
+
+def _extract_overlay_bundle(
+    source_directory: Path,
+    output_directory: Path,
+    skeleton_path: Path,
+    fallback_atlas: Path,
+) -> SpineBundle:
+    relative_directory = skeleton_path.parent.relative_to(source_directory)
+    target_directory = output_directory / relative_directory
+    target_directory.mkdir(parents=True, exist_ok=True)
+    target_skeleton = target_directory / skeleton_path.name
+    target_atlas = target_directory / fallback_atlas.name
+    _copy_spine_file(skeleton_path, target_skeleton, False)
+    _copy_spine_file(fallback_atlas, target_atlas, False)
+
+    image_files: list[str] = []
+    for page_name in _atlas_page_names(fallback_atlas):
+        source_image = (fallback_atlas.parent / page_name).resolve()
+        if not _is_relative_to(source_image, fallback_atlas.parent.resolve()):
+            continue
+        if not source_image.is_file():
+            continue
+        relative_image = source_image.relative_to(fallback_atlas.parent.resolve())
+        target_image = target_directory / relative_image
+        _copy_spine_file(source_image, target_image, True)
+        image_files.append(relative_image.as_posix())
+
+    image_files = sorted(set(image_files))
+    return SpineBundle(
+        relative_directory=relative_directory.as_posix(),
+        atlas_files=[fallback_atlas.name],
+        skeleton_files=[skeleton_path.name],
+        image_files=image_files,
+        file_count=2 + len(image_files),
+    )
+
+
+def _build_spine_index_entries(
+    output_directory: Path,
+    bundles: list[SpineBundle],
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for bundle in bundles:
+        atlas_by_stem = {
+            Path(atlas_file).with_suffix("").as_posix(): atlas_file
+            for atlas_file in bundle.atlas_files
+        }
+        for skeleton_file in bundle.skeleton_files:
+            atlas_file = atlas_by_stem.get(Path(skeleton_file).with_suffix("").as_posix())
+            if atlas_file is None:
+                continue
+            atlas_path = output_directory / Path(bundle.relative_directory) / Path(atlas_file)
+            atlas_parent = Path(atlas_file).parent
+            image_files = sorted(
+                {
+                    (atlas_parent / Path(page_name)).as_posix()
+                    for page_name in _atlas_page_names(atlas_path)
+                    if (atlas_parent / Path(page_name)).as_posix() in bundle.image_files
+                }
+            )
+            entries.append(
+                {
+                    "name": Path(skeleton_file).stem,
+                    "relative_directory": bundle.relative_directory,
+                    "atlas_files": [atlas_file],
+                    "skeleton_files": [skeleton_file],
+                    "image_files": image_files,
+                    "file_count": 2 + len(image_files),
+                }
+            )
+    entries.sort(
+        key=lambda entry: (
+            str(entry["relative_directory"]).casefold(),
+            str(entry["skeleton_files"][0]).casefold(),
+        )
+    )
+    return [{"id": index, **entry} for index, entry in enumerate(entries)]
 
 
 def extract_spine_bundles(
@@ -225,21 +344,38 @@ def extract_spine_bundles(
     bundle_directories = discover_spine_bundle_directories(
         source_directory, progress_callback=progress_callback
     )
-    if not bundle_directories:
+    overlay_skeletons = _discover_upgrade_overlay_skeletons(source_directory)
+    if not bundle_directories and not overlay_skeletons:
         raise SpineExtractError(f"no Spine bundles found in {source_directory}")
 
-    bundles: list[SpineBundle | None] = [None] * len(bundle_directories)
+    total_bundle_count = len(bundle_directories) + len(overlay_skeletons)
+    bundles: list[SpineBundle | None] = [None] * total_bundle_count
     last_copy_progress = time.monotonic()
     if progress_callback is not None:
-        progress_callback("copy", 0, len(bundle_directories), output_directory)
+        progress_callback("copy", 0, total_bundle_count, output_directory)
     with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as executor:
-        futures = {
-            executor.submit(_extract_one_bundle, source_directory, output_directory, bundle): index
-            for index, bundle in enumerate(bundle_directories)
-        }
+        futures: dict[Future[SpineBundle], tuple[int, Path]] = {}
+        for index, bundle_directory in enumerate(bundle_directories):
+            future = executor.submit(
+                _extract_one_bundle,
+                source_directory,
+                output_directory,
+                bundle_directory,
+            )
+            futures[future] = (index, bundle_directory)
+        overlay_offset = len(bundle_directories)
+        for overlay_index, (skeleton_path, fallback_atlas) in enumerate(overlay_skeletons):
+            future = executor.submit(
+                _extract_overlay_bundle,
+                source_directory,
+                output_directory,
+                skeleton_path,
+                fallback_atlas,
+            )
+            futures[future] = (overlay_offset + overlay_index, skeleton_path.parent)
         completed = 0
         for future in as_completed(futures):
-            index = futures[future]
+            index, current_path = futures[future]
             bundles[index] = future.result()
             completed += 1
             if (
@@ -248,16 +384,16 @@ def extract_spine_bundles(
                     completed == 1
                     or completed % 50 == 0
                     or time.monotonic() - last_copy_progress >= 1
-                    or completed == len(bundle_directories)
+                    or completed == total_bundle_count
                 )
             ):
-                progress_callback("copy", completed, len(bundle_directories), bundle_directories[index])
+                progress_callback("copy", completed, total_bundle_count, current_path)
                 last_copy_progress = time.monotonic()
 
     completed_bundles = [bundle for bundle in bundles if bundle is not None]
     total_files = sum(bundle.file_count for bundle in completed_bundles)
     if progress_callback is not None:
-        progress_callback("copy", len(bundle_directories), len(bundle_directories), output_directory)
+        progress_callback("copy", total_bundle_count, total_bundle_count, output_directory)
 
     manifest = {
         "package_name": package_name,
@@ -269,6 +405,7 @@ def extract_spine_bundles(
         "bundles": [bundle.to_dict() for bundle in completed_bundles],
         "notes": [
             "A Spine bundle is detected by a .atlas file with a sibling .skel, .json, or .bytes file.",
+            "Upgrade-only skeletons reuse atlas and texture files from the same logical OBB path.",
             "Only atlas files, matching skeletons, and atlas-referenced texture pages are copied.",
             "Referenced UF 00 02 textures are decoded to standard PNG files during extraction.",
         ],
@@ -277,18 +414,12 @@ def extract_spine_bundles(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    index_entries = _build_spine_index_entries(output_directory, completed_bundles)
     index = {
         "version": 1,
         "package_name": package_name,
-        "bundle_count": len(completed_bundles),
-        "bundles": [
-            {
-                "id": index,
-                "name": bundle.relative_directory.rstrip("/").split("/")[-1],
-                **bundle.to_dict(),
-            }
-            for index, bundle in enumerate(completed_bundles)
-        ],
+        "bundle_count": len(index_entries),
+        "bundles": index_entries,
     }
     (output_directory / "spine-index.json").write_text(
         json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"

@@ -51,8 +51,12 @@ Spine bundle：
 实际引用的贴图页。输出根目录会写入 `spine-manifest.json`，记录源路径、目标路径、
 bundle 数量、文件数量和每个 bundle 内的 atlas、骨骼文件、图片文件。
 
-同时会写入轻量的 `spine-index.json`，播放器只读取它来展示动画目录，点击目录后才加载
-对应的 skeleton 和贴图。
+如果 `upgrade/res/...` 只有新版本骨骼文件，工具会自动复用同一逻辑路径下
+`obb/res/...` 的 atlas 和贴图，生成可独立加载的完整资源组合。
+
+同时会写入轻量的 `spine-index.json`。索引按每个 skeleton/atlas 组合单独列项，因此同一
+目录中的主动画、背景动画或多套战斗文字动画都会分别显示；播放器点击条目后才加载对应
+skeleton 和贴图。
 
 atlas 引用的贴图如果以 `UF 00 02` 开头，会在复制时自动完成 UF 解封、CCZ 解压和
 ETC2/PVR 到 PNG 的转换；`spine_exports` 中的 `.png` 因而可以直接查看和供播放器加载。

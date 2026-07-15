@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -88,3 +89,55 @@ def test_extract_spine_bundles_requires_overwrite_for_existing_output(tmp_path: 
 
     with pytest.raises(SpineExtractError, match="already exists"):
         extract_spine_bundles(package_name, source_base=source_base, output_base=output_base)
+
+
+def test_spine_index_lists_each_skeleton_pair_separately(tmp_path: Path) -> None:
+    package_name = "com.example.demo"
+    source_base = tmp_path / "exports"
+    output_base = tmp_path / "spine_exports"
+    bundle = source_base / package_name / "data" / "files" / "spine" / "tween"
+    for name in ("damage", "heal"):
+        _write_file(bundle / f"{name}.atlas", f"{name}.png\nsize: 64,64\n".encode())
+        _write_file(bundle / f"{name}.skel")
+        _write_file(bundle / f"{name}.png")
+
+    result = extract_spine_bundles(
+        package_name,
+        source_base=source_base,
+        output_base=output_base,
+    )
+
+    index = json.loads((result.output_directory / "spine-index.json").read_text())
+    assert result.bundle_count == 1
+    assert index["bundle_count"] == 2
+    assert [entry["name"] for entry in index["bundles"]] == ["damage", "heal"]
+    assert all(len(entry["skeleton_files"]) == 1 for entry in index["bundles"])
+    assert all(len(entry["atlas_files"]) == 1 for entry in index["bundles"])
+
+
+def test_upgrade_skeleton_reuses_matching_obb_atlas(tmp_path: Path) -> None:
+    package_name = "com.example.demo"
+    source_base = tmp_path / "exports"
+    output_base = tmp_path / "spine_exports"
+    package_root = source_base / package_name / "data" / "files"
+    logical_path = Path("res/common/battle/knight_spine/1001")
+    obb_bundle = package_root / "obb" / logical_path
+    upgrade_bundle = package_root / "upgrade" / logical_path
+    _write_file(obb_bundle / "1001.atlas", b"1001.png\nsize: 64,64\n")
+    _write_file(obb_bundle / "1001.skel", b"old-skeleton")
+    _write_file(obb_bundle / "1001.png", b"texture")
+    _write_file(upgrade_bundle / "1001.skel", b"new-skeleton")
+
+    result = extract_spine_bundles(
+        package_name,
+        source_base=source_base,
+        output_base=output_base,
+    )
+
+    extracted_upgrade = result.output_directory / "data" / "files" / "upgrade" / logical_path
+    assert (extracted_upgrade / "1001.skel").read_bytes() == b"new-skeleton"
+    assert (extracted_upgrade / "1001.atlas").is_file()
+    assert (extracted_upgrade / "1001.png").read_bytes() == b"texture"
+    index = json.loads((result.output_directory / "spine-index.json").read_text())
+    assert index["bundle_count"] == 2
+    assert any("/upgrade/" in entry["relative_directory"] for entry in index["bundles"])

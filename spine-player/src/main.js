@@ -30,6 +30,8 @@ const elements = {
   animationSearch: document.querySelector("#animation-search"),
   animationList: document.querySelector("#animation-list"),
   animationCount: document.querySelector("#animation-count"),
+  previousAnimation: document.querySelector("#previous-animation"),
+  nextAnimation: document.querySelector("#next-animation"),
   actionSelect: document.querySelector("#action-select"),
   playButton: document.querySelector("#play-button"),
   resetButton: document.querySelector("#reset-button"),
@@ -49,10 +51,18 @@ const elements = {
   canvas: document.querySelector("#stage"),
   stageEmpty: document.querySelector("#stage-empty"),
 };
+const animationListContent = document.createElement("div");
+animationListContent.className = "animation-list-content";
+elements.animationList.append(animationListContent);
+
+const ANIMATION_ROW_HEIGHT = 46;
+const ANIMATION_LIST_OVERSCAN = 6;
 
 const state = {
   manifest: null,
   bundles: [],
+  bundleEntries: [],
+  filteredBundleEntries: [],
   currentBundleIndex: -1,
   skeleton: null,
   animationState: null,
@@ -68,6 +78,8 @@ const state = {
   frameCount: 0,
   fpsTime: performance.now(),
   imageCache: new Map(),
+  listRenderFrame: 0,
+  listFilterFrame: 0,
 };
 
 const gl = elements.canvas.getContext("webgl", {
@@ -281,6 +293,8 @@ async function loadBundle(index, requestedAnimation = "") {
   const bundle = state.bundles[index];
   if (!bundle) return;
   elements.actionSelect.disabled = true;
+  elements.previousAnimation.disabled = true;
+  elements.nextAnimation.disabled = true;
   elements.playButton.disabled = true;
   elements.resetButton.disabled = true;
   elements.timeRange.disabled = true;
@@ -347,6 +361,7 @@ async function loadBundle(index, requestedAnimation = "") {
     } else {
       setStatus("Runtime ready", "status-ready");
     }
+    updateAnimationNavigation();
   } catch (error) {
     state.skeleton = null;
     state.animationState = null;
@@ -355,6 +370,7 @@ async function loadBundle(index, requestedAnimation = "") {
     state.currentAnimations = [];
     state.duration = 0;
     showError(error);
+    updateAnimationNavigation();
   }
 }
 
@@ -363,29 +379,67 @@ function formatTime(seconds) {
 }
 
 function fillBundleList() {
-  elements.animationList.replaceChildren();
-  elements.animationCount.textContent = String(state.bundles.length);
-  for (const [index, bundle] of state.bundles.entries()) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "animation-item";
-    button.dataset.bundleIndex = String(index);
-    button.setAttribute("role", "option");
+  state.bundleEntries = state.bundles.map((bundle, index) => {
     const displayName = bundle.name || bundle.relative_directory.split("/").pop();
-    button.dataset.animationName = displayName.toLocaleLowerCase();
-    const name = document.createElement("span");
-    name.className = "animation-item-name";
-    name.textContent = displayName;
-    const source = document.createElement("span");
-    source.className = "animation-item-source";
-    source.textContent = bundle.relative_directory;
-    const duration = document.createElement("span");
-    duration.className = "animation-item-time";
-    duration.textContent = `${bundle.image_files.length} tex`;
-    button.append(name, source, duration);
-    elements.animationList.append(button);
-  }
+    return { bundle, index, displayName, normalizedName: displayName.toLowerCase() };
+  });
+  state.filteredBundleEntries = state.bundleEntries;
+  elements.animationList.scrollTop = 0;
+  renderAnimationList();
   fillCurrentActionSelect();
+}
+
+function createAnimationListItem(entry, rowIndex) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "animation-item";
+  button.dataset.bundleIndex = String(entry.index);
+  button.setAttribute("role", "option");
+  button.style.transform = `translateY(${rowIndex * ANIMATION_ROW_HEIGHT}px)`;
+  const active = entry.index === state.currentBundleIndex;
+  button.classList.toggle("is-active", active);
+  button.setAttribute("aria-selected", String(active));
+
+  const name = document.createElement("span");
+  name.className = "animation-item-name";
+  name.textContent = entry.displayName;
+  const source = document.createElement("span");
+  source.className = "animation-item-source";
+  source.textContent = entry.bundle.relative_directory;
+  const duration = document.createElement("span");
+  duration.className = "animation-item-time";
+  duration.textContent = `${entry.bundle.image_files.length} tex`;
+  button.append(name, source, duration);
+  return button;
+}
+
+function renderAnimationList() {
+  const entries = state.filteredBundleEntries;
+  elements.animationCount.textContent = String(entries.length);
+  animationListContent.style.height = `${entries.length * ANIMATION_ROW_HEIGHT}px`;
+  const viewportHeight = elements.animationList.clientHeight || 400;
+  const start = Math.max(
+    0,
+    Math.floor(elements.animationList.scrollTop / ANIMATION_ROW_HEIGHT) - ANIMATION_LIST_OVERSCAN,
+  );
+  const end = Math.min(
+    entries.length,
+    Math.ceil((elements.animationList.scrollTop + viewportHeight) / ANIMATION_ROW_HEIGHT)
+      + ANIMATION_LIST_OVERSCAN,
+  );
+  const fragment = document.createDocumentFragment();
+  for (let index = start; index < end; index += 1) {
+    fragment.append(createAnimationListItem(entries[index], index));
+  }
+  animationListContent.replaceChildren(fragment);
+}
+
+function queueAnimationListRender() {
+  if (state.listRenderFrame) return;
+  state.listRenderFrame = requestAnimationFrame(() => {
+    state.listRenderFrame = 0;
+    renderAnimationList();
+  });
 }
 
 function fillCurrentActionSelect() {
@@ -422,6 +476,43 @@ function updateBundleSelection() {
     button.setAttribute("aria-selected", String(active));
   }
   elements.actionSelect.value = state.animationName;
+  updateAnimationNavigation();
+}
+
+function updateAnimationNavigation() {
+  const entries = state.filteredBundleEntries;
+  const currentPosition = entries.findIndex((entry) => entry.index === state.currentBundleIndex);
+  elements.previousAnimation.disabled = currentPosition <= 0;
+  elements.nextAnimation.disabled = currentPosition < 0 || currentPosition >= entries.length - 1;
+}
+
+function scrollAnimationIntoView(bundleIndex) {
+  const rowIndex = state.filteredBundleEntries.findIndex((entry) => entry.index === bundleIndex);
+  if (rowIndex < 0) return;
+  const rowTop = rowIndex * ANIMATION_ROW_HEIGHT;
+  const rowBottom = rowTop + ANIMATION_ROW_HEIGHT;
+  const viewportTop = elements.animationList.scrollTop;
+  const viewportBottom = viewportTop + elements.animationList.clientHeight;
+  if (rowTop < viewportTop) {
+    elements.animationList.scrollTop = rowTop;
+  } else if (rowBottom > viewportBottom) {
+    elements.animationList.scrollTop = rowBottom - elements.animationList.clientHeight;
+  }
+  renderAnimationList();
+}
+
+async function navigateAnimation(direction) {
+  if (elements.previousAnimation.disabled && direction < 0) return;
+  if (elements.nextAnimation.disabled && direction > 0) return;
+  const currentPosition = state.filteredBundleEntries.findIndex(
+    (entry) => entry.index === state.currentBundleIndex,
+  );
+  const target = state.filteredBundleEntries[currentPosition + direction];
+  if (!target) return;
+  await loadBundle(target.index);
+  if (state.currentBundleIndex === target.index) {
+    scrollAnimationIntoView(target.index);
+  }
 }
 
 function updateTimeline() {
@@ -618,12 +709,23 @@ elements.animationList.addEventListener("click", async (event) => {
     await loadBundle(bundleIndex);
   }
 });
+elements.animationList.addEventListener("scroll", queueAnimationListRender, { passive: true });
 elements.animationSearch.addEventListener("input", () => {
-  const query = elements.animationSearch.value.trim().toLowerCase();
-  for (const button of elements.animationList.querySelectorAll(".animation-item")) {
-    button.hidden = query.length > 0 && !button.dataset.animationName.includes(query);
-  }
+  if (state.listFilterFrame) cancelAnimationFrame(state.listFilterFrame);
+  state.listFilterFrame = requestAnimationFrame(() => {
+    state.listFilterFrame = 0;
+    const query = elements.animationSearch.value.trim().toLowerCase();
+    state.filteredBundleEntries = query
+      ? state.bundleEntries.filter((entry) => entry.normalizedName.includes(query))
+      : state.bundleEntries;
+    elements.animationList.scrollTop = 0;
+    renderAnimationList();
+    updateAnimationNavigation();
+  });
 });
+window.addEventListener("resize", queueAnimationListRender);
+elements.previousAnimation.addEventListener("click", () => navigateAnimation(-1));
+elements.nextAnimation.addEventListener("click", () => navigateAnimation(1));
 elements.actionSelect.addEventListener("change", () => {
   setActiveAnimation(elements.actionSelect.value);
 });

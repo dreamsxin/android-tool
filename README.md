@@ -113,6 +113,8 @@ android-tool spine-extract com.yoozoo.jgame.global
 `spine_exports/com.yoozoo.jgame.global/`。重复提取时添加 `--overwrite`。输出目录会保留
 原始相对路径，将 atlas 引用的 `UF 00 02` 贴图直接转换为标准 PNG，并写入
 `spine-manifest.json` 方便审计，同时生成 `spine-index.json` 供播放器快速列出动画目录。
+同目录存在多套 skeleton 时，索引会分别列出每套动画；`upgrade` 只有新骨骼文件时，会
+自动复用同逻辑路径下的 `obb` atlas 和贴图。
 
 扫描大型导出目录时会显示扫描文件数、发现的 Spine bundle 数和复制进度；使用
 `--quiet` 可以关闭进度，只保留最终摘要。
