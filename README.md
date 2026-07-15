@@ -19,6 +19,7 @@
 | `emulator-probe` | 查询 ADB 设备，或并发扫描本地模拟器端口 | 可用 |
 | `app-list` | 列出已安装应用、包名和 APK 路径 | 可用 |
 | `app-export` | 按包名导出 APK、私有数据和标准外部数据 | 可用 |
+| `spine-extract` | 从导出结果中提取 Spine 动画资源 | 可用 |
 | `adb-connect` | 连接、断开或检查 ADB 目标 | 可用 |
 | `app-inspect` | 查询版本、UID、权限、组件和安装信息 | 可用 |
 | `app-log` | 按包名或 PID 收集 logcat | 可用 |
@@ -97,6 +98,18 @@ exports/com.example.demo/
 
 私有目录需要设备 root 权限，或应用允许 `run-as`。Android 允许但 Windows 不支持的
 文件名会进行可逆编码，映射记录在 `metadata/path-map.json`。
+
+### 4. 提取 Spine 动画资源
+
+从已有 `app-export` 结果中抽取 `.atlas`、`.skel` 和配套贴图：
+
+```powershell
+android-tool spine-extract com.yoozoo.jgame.global
+```
+
+默认读取 `exports/com.yoozoo.jgame.global/`，输出到
+`spine_exports/com.yoozoo.jgame.global/`。重复提取时添加 `--overwrite`。输出目录会保留
+原始相对路径，并写入 `spine-manifest.json` 方便审计。
 
 ## 后续规划
 

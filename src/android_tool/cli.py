@@ -16,6 +16,7 @@ from android_tool.tools.app_list import AppListError, list_installed_packages
 from android_tool.tools.app_export import AppExportError, export_app_data
 from android_tool.tools.apk_install import ApkInstallError, install_apks, uninstall_package
 from android_tool.tools.emulator_probe import ProbeOptions, probe_emulators
+from android_tool.tools.spine_extract import SpineExtractError, extract_spine_bundles
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,6 +84,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, default=30.0, help="ADB inactivity timeout in seconds."
     )
     app_export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    spine_extract = subparsers.add_parser(
+        "spine-extract",
+        help="Extract Spine animation bundles from an app-export result.",
+    )
+    spine_extract.add_argument("package", help="Android package name already exported under --source.")
+    spine_extract.add_argument(
+        "--source",
+        default="exports",
+        help="Parent directory containing the package export.",
+    )
+    spine_extract.add_argument(
+        "--output",
+        default="spine_exports",
+        help="Parent output directory; a package-named directory is created inside it.",
+    )
+    spine_extract.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing package output directory.",
+    )
+    spine_extract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     adb_connect_parser = subparsers.add_parser(
         "adb-connect",
@@ -301,6 +324,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Exported {args.package} from {result.device.serial}")
         print(f"Output: {result.output_directory}")
         print(f"Sources: {len(result.entries)}, estimated bytes: {result.estimated_bytes}")
+        return 0
+
+    if args.command == "spine-extract":
+        try:
+            result = extract_spine_bundles(
+                package_name=args.package,
+                source_base=args.source,
+                output_base=args.output,
+                overwrite=args.overwrite,
+            )
+        except (AppExportError, SpineExtractError, OSError) as exc:
+            parser.exit(2, f"error: {exc}\n")
+
+        if args.json:
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            return 0
+
+        print(f"Extracted Spine bundles for {result.package_name}")
+        print(f"Output: {result.output_directory}")
+        print(f"Bundles: {result.bundle_count}, files: {result.file_count}")
         return 0
 
     if args.command == "adb-connect":
