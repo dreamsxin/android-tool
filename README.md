@@ -131,6 +131,8 @@ npm run dev
 
 播放器读取上面的 `spine-index.json`，左侧直接列出所有动画目录；点击目录后加载其中的
 skeleton、贴图和动作，可切换动作、循环状态、时间轴、速度和显示缩放。
+原始 PVR 贴图标记为预乘 Alpha，播放器使用对应的 WebGL 混合方式，避免半透明区域
+颜色偏暗。
 `spine-extract` 会自动将 atlas 引用的 `UF 00 02` 贴图转换为标准 PNG，因此 Spine 播放器
 不需要再执行 `uf-extract`。如果需要解封整个应用中的所有 UF 资源，再使用：
 

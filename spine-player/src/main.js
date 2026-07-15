@@ -85,7 +85,7 @@ const state = {
 const gl = elements.canvas.getContext("webgl", {
   alpha: true,
   antialias: true,
-  premultipliedAlpha: false,
+  premultipliedAlpha: true,
 });
 const textureCache = new WeakMap();
 
@@ -594,7 +594,7 @@ function drawSkeleton() {
 
   gl.useProgram(renderer.program);
   gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.disable(gl.DEPTH_TEST);
   gl.disable(gl.CULL_FACE);
   gl.activeTexture(gl.TEXTURE0);
@@ -670,12 +670,13 @@ function drawTexturedAttachment(
   gl.bindTexture(gl.TEXTURE_2D, getWebGLTexture(image));
 
   const skeletonColor = state.skeleton.color;
+  const alpha = skeletonColor.a * slot.color.a * attachment.color.a;
   gl.uniform4f(
     renderer.colorLocation,
-    skeletonColor.r * slot.color.r * attachment.color.r,
-    skeletonColor.g * slot.color.g * attachment.color.g,
-    skeletonColor.b * slot.color.b * attachment.color.b,
-    skeletonColor.a * slot.color.a * attachment.color.a,
+    skeletonColor.r * slot.color.r * attachment.color.r * alpha,
+    skeletonColor.g * slot.color.g * attachment.color.g * alpha,
+    skeletonColor.b * slot.color.b * attachment.color.b * alpha,
+    alpha,
   );
   gl.drawElements(gl.TRIANGLES, triangles.length, gl.UNSIGNED_SHORT, 0);
 }

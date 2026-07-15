@@ -88,7 +88,11 @@ npm run dev
 ```
 
 该 3.8 兼容包声明了仅用于 Node 环境的可选 Canvas 依赖；播放器本身使用浏览器
-Canvas，因此安装时加 `--ignore-scripts` 可避免在 Windows 上编译无关的原生模块。
+WebGL，因此安装时加 `--ignore-scripts` 可避免在 Windows 上编译无关的原生模块。
+
+游戏的 PVR v3 贴图头使用 `flags=0x2`，表示颜色已经预乘 Alpha。播放器因此使用
+WebGL 预乘 Alpha 画布和 `ONE, ONE_MINUS_SRC_ALPHA` 混合，避免半透明贴图被再次乘
+Alpha 后整体偏暗。
 
 ## 当前样本验证结果
 
