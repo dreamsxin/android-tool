@@ -78,6 +78,30 @@ def test_extract_spine_bundles_preserves_relative_layout(tmp_path: Path) -> None
     assert progress[-1][:3] == ("copy", 1, 1)
 
 
+def test_extract_spine_bundles_resolves_legacy_encoded_texture_names(
+    tmp_path: Path,
+) -> None:
+    package_name = "com.example.demo"
+    source_base = tmp_path / "exports"
+    output_base = tmp_path / "spine_exports"
+    bundle = source_base / package_name / "res" / "effect_spine" / "demo"
+    _write_file(bundle / "demo.atlas", b"DemoTexture.png\nsize: 64,64\n")
+    _write_file(bundle / "demo.skel")
+    decoded_png = b"\x89PNG\r\n\x1a\n" + b"texture"
+    _write_file(bundle / "%44emo%54exture.png", decoded_png)
+
+    result = extract_spine_bundles(
+        package_name,
+        source_base=source_base,
+        output_base=output_base,
+    )
+
+    extracted = result.output_directory / "res" / "effect_spine" / "demo"
+    assert (extracted / "DemoTexture.png").read_bytes() == decoded_png
+    index = json.loads((result.output_directory / "spine-index.json").read_text())
+    assert index["bundles"][0]["image_files"] == ["DemoTexture.png"]
+
+
 def test_extract_spine_bundles_requires_overwrite_for_existing_output(tmp_path: Path) -> None:
     package_name = "com.example.demo"
     source_base = tmp_path / "exports"

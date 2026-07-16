@@ -116,7 +116,9 @@ android-tool spine-extract com.yoozoo.jgame.global
 原始相对路径，将 atlas 引用的 `UF 00 02` 贴图直接转换为标准 PNG，并写入
 `spine-manifest.json` 方便审计，同时生成 `spine-index.json` 供播放器快速列出动画目录。
 同目录存在多套 skeleton 时，索引会分别列出每套动画；`upgrade` 只有新骨骼文件时，会
-自动复用同逻辑路径下的 `obb` atlas 和贴图。
+自动复用同逻辑路径下的 `obb` atlas 和贴图；`upgrade` 只有新 atlas 和贴图时，也会复用
+OBB 或 APK 中的骨骼文件。atlas 页名对应旧版 `%XX` 编码文件时，输出会恢复 atlas 引用的
+原始文件名。
 索引还会识别 `<name> + <name>_bg` 以及明确的 `_bg/_boom/_fg` 资源家族，并记录为
 背景、主体、效果、前景有序组合场景。
 `apk/assets/res` 中的基础 Spine 资源也会提取；播放器索引按 `apk < obb < upgrade` 处理

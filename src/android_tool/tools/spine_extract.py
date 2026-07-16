@@ -129,37 +129,38 @@ def discover_spine_bundle_directories(
     return selected
 
 
-def _bundle_file_lists(bundle_directory: Path) -> tuple[list[str], list[str], list[str], int]:
-    selected_files: set[Path] = set()
+def _bundle_file_lists(
+    bundle_directory: Path,
+) -> tuple[list[str], list[str], dict[str, Path], int]:
     atlas_files: list[str] = []
     skeleton_files: list[str] = []
-    image_files: list[str] = []
+    image_sources: dict[str, Path] = {}
 
     for atlas_path in sorted(bundle_directory.rglob("*.atlas")):
         if not atlas_path.is_file():
             continue
-        selected_files.add(atlas_path)
         atlas_files.append(atlas_path.relative_to(bundle_directory).as_posix())
 
         for extension in SKELETON_EXTENSIONS:
             skeleton_path = atlas_path.with_suffix(extension)
             if skeleton_path.is_file():
-                selected_files.add(skeleton_path)
                 skeleton_files.append(skeleton_path.relative_to(bundle_directory).as_posix())
                 break
 
         for page_name in _atlas_page_names(atlas_path):
-            image_path = (atlas_path.parent / page_name).resolve()
+            image_path = _resolve_atlas_page_path(atlas_path, page_name)
+            if image_path is None:
+                continue
             if not _is_relative_to(image_path, bundle_directory.resolve()) or not image_path.is_file():
                 continue
-            selected_files.add(image_path)
-            image_files.append(image_path.relative_to(bundle_directory.resolve()).as_posix())
+            target_image = (Path(atlas_path.relative_to(bundle_directory)).parent / page_name).as_posix()
+            image_sources[target_image] = image_path
 
     # Keep manifest ordering stable when an atlas references the same page more than once.
     atlas_files = sorted(set(atlas_files))
     skeleton_files = sorted(set(skeleton_files))
-    image_files = sorted(set(image_files))
-    return atlas_files, skeleton_files, image_files, len(selected_files)
+    file_count = len(atlas_files) + len(skeleton_files) + len(image_sources)
+    return atlas_files, skeleton_files, image_sources, file_count
 
 
 def _atlas_page_names(atlas_path: Path) -> list[str]:
@@ -174,6 +175,28 @@ def _atlas_page_names(atlas_path: Path) -> list[str]:
     return pages
 
 
+def _legacy_portable_component(component: str) -> str:
+    encoded_parts: list[str] = []
+    for character in component:
+        if "a" <= character <= "z" or "0" <= character <= "9" or character in "._-":
+            encoded_parts.append(character)
+        else:
+            encoded_parts.extend(f"%{byte:02X}" for byte in character.encode("utf-8"))
+    return "".join(encoded_parts)
+
+
+def _resolve_atlas_page_path(atlas_path: Path, page_name: str) -> Path | None:
+    direct_path = (atlas_path.parent / Path(page_name)).resolve()
+    if direct_path.is_file():
+        return direct_path
+    page_parts = PurePosixPath(page_name).parts
+    legacy_path = (
+        atlas_path.parent
+        / Path(*(_legacy_portable_component(part) for part in page_parts))
+    ).resolve()
+    return legacy_path if legacy_path.is_file() else None
+
+
 def _extract_one_bundle(
     source_directory: Path,
     output_directory: Path,
@@ -182,13 +205,18 @@ def _extract_one_bundle(
     relative_directory = bundle_directory.relative_to(source_directory)
     target_directory = output_directory / relative_directory
     target_directory.parent.mkdir(parents=True, exist_ok=True)
-    atlas_files, skeleton_files, image_files, file_count = _bundle_file_lists(bundle_directory)
-    selected_relative_files = set(atlas_files + skeleton_files + image_files)
-    for relative_file in sorted(selected_relative_files):
+    atlas_files, skeleton_files, image_sources, file_count = _bundle_file_lists(
+        bundle_directory
+    )
+    for relative_file in sorted(set(atlas_files + skeleton_files)):
         source_file = bundle_directory / Path(relative_file)
         target_file = target_directory / Path(relative_file)
         target_file.parent.mkdir(parents=True, exist_ok=True)
-        _copy_spine_file(source_file, target_file, relative_file in image_files)
+        _copy_spine_file(source_file, target_file, False)
+    for relative_file, source_file in sorted(image_sources.items()):
+        target_file = target_directory / Path(relative_file)
+        _copy_spine_file(source_file, target_file, True)
+    image_files = sorted(image_sources)
     return SpineBundle(
         relative_directory=relative_directory.as_posix(),
         atlas_files=atlas_files,
@@ -310,12 +338,12 @@ def _extract_overlay_bundle(
 
     image_files: list[str] = []
     for page_name in _atlas_page_names(fallback_atlas):
-        source_image = (fallback_atlas.parent / page_name).resolve()
+        source_image = _resolve_atlas_page_path(fallback_atlas, page_name)
+        if source_image is None:
+            continue
         if not _is_relative_to(source_image, fallback_atlas.parent.resolve()):
             continue
-        if not source_image.is_file():
-            continue
-        relative_image = source_image.relative_to(fallback_atlas.parent.resolve())
+        relative_image = Path(page_name)
         target_image = target_directory / relative_image
         _copy_spine_file(source_image, target_image, True)
         image_files.append(relative_image.as_posix())
@@ -346,12 +374,12 @@ def _extract_atlas_overlay_bundle(
 
     image_files: list[str] = []
     for page_name in _atlas_page_names(atlas_path):
-        source_image = (atlas_path.parent / page_name).resolve()
+        source_image = _resolve_atlas_page_path(atlas_path, page_name)
+        if source_image is None:
+            continue
         if not _is_relative_to(source_image, atlas_path.parent.resolve()):
             continue
-        if not source_image.is_file():
-            continue
-        relative_image = source_image.relative_to(atlas_path.parent.resolve())
+        relative_image = Path(page_name)
         target_image = target_directory / relative_image
         _copy_spine_file(source_image, target_image, True)
         image_files.append(relative_image.as_posix())
