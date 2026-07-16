@@ -64,6 +64,7 @@ const state = {
   bundleEntries: [],
   filteredBundleEntries: [],
   currentBundleIndex: -1,
+  layers: [],
   skeleton: null,
   animationState: null,
   currentAnimations: [],
@@ -71,6 +72,7 @@ const state = {
   animationData: null,
   trackEntry: null,
   duration: 0,
+  viewBounds: null,
   playing: true,
   speed: 1,
   scale: 1,
@@ -267,6 +269,51 @@ function bundlePath(bundle, relativePath) {
   return `${bundle.relative_directory}/${relativePath}`;
 }
 
+function bundleIsComplete(bundle) {
+  return bundle.atlas_files.length && bundle.skeleton_files.length && bundle.image_files.length;
+}
+
+function buildPlayerEntries(manifest) {
+  const bundles = manifest.bundles.filter(bundleIsComplete);
+  const bundleById = new Map(bundles.map((bundle) => [bundle.id, bundle]));
+  const usedBundleIds = new Set();
+  const scenes = [];
+  for (const scene of manifest.scenes ?? []) {
+    const layers = scene.layers.flatMap((layer) => {
+      const bundle = bundleById.get(layer.bundle_id);
+      return bundle ? [{ role: layer.role, bundle }] : [];
+    });
+    if (layers.length !== scene.layers.length || layers.length < 2) continue;
+    const primaryLayerIndex = Math.max(
+      0,
+      layers.findIndex((layer) => layer.bundle.id === scene.primary_bundle_id),
+    );
+    layers.forEach((layer) => usedBundleIds.add(layer.bundle.id));
+    scenes.push({
+      name: scene.name,
+      relative_directory: scene.relative_directory,
+      layers,
+      primaryLayerIndex,
+      image_files: layers.flatMap((layer) => layer.bundle.image_files),
+      isScene: true,
+    });
+  }
+  const standalone = bundles
+    .filter((bundle) => !usedBundleIds.has(bundle.id))
+    .map((bundle) => ({
+      name: bundle.name,
+      relative_directory: bundle.relative_directory,
+      layers: [{ role: "main", bundle }],
+      primaryLayerIndex: 0,
+      image_files: bundle.image_files,
+      isScene: false,
+    }));
+  return [...standalone, ...scenes].sort((left, right) => (
+    left.relative_directory.localeCompare(right.relative_directory)
+    || left.name.localeCompare(right.name)
+  ));
+}
+
 function readSkeletonData(
   atlasText,
   skeletonBytes,
@@ -290,8 +337,8 @@ function readSkeletonData(
 
 async function loadBundle(index, requestedAnimation = "") {
   clearError();
-  const bundle = state.bundles[index];
-  if (!bundle) return;
+  const entry = state.bundles[index];
+  if (!entry) return;
   elements.actionSelect.disabled = true;
   elements.previousAnimation.disabled = true;
   elements.nextAnimation.disabled = true;
@@ -302,59 +349,35 @@ async function loadBundle(index, requestedAnimation = "") {
   elements.stageEmpty.textContent = "Parsing skeleton";
 
   try {
-    const atlasPath = bundlePath(bundle, selectAtlasFile(bundle));
-    const skeletonPath = bundlePath(bundle, selectSkeletonFile(bundle));
-    const atlasText = await (await fetch(assetUrl(atlasPath))).text();
-    const imagePaths = bundle.image_files.map((file) => bundlePath(bundle, file));
-    const loadedImages = await Promise.all(imagePaths.map(async (path) => {
-      try {
-        return [path, await loadImage(path), null];
-      } catch (error) {
-        return [path, null, error];
-      }
-    }));
-    const imagesByName = new Map();
-    const missingTextures = new Set();
-    for (const [path, image, error] of loadedImages) {
-      if (error) {
-        missingTextures.add(path);
-        continue;
-      }
-      imagesByName.set(path, image);
-      imagesByName.set(path.split("/").pop(), image);
-    }
-    const skeletonBytes = await loadBytes(skeletonPath);
-    const skeletonData = readSkeletonData(
-      atlasText,
-      skeletonBytes,
-      skeletonPath,
-      imagesByName,
-      missingTextures,
-      true,
+    const loadedLayers = await Promise.all(entry.layers.map(loadSpineLayer));
+    const primaryLayer = loadedLayers[entry.primaryLayerIndex];
+    const missingTextureNames = new Set(
+      loadedLayers.flatMap((layer) => [...layer.missingTextures]),
     );
-    const missingTextureNames = new Set([...missingTextures].map((path) => path.split("/").pop()));
-    const skeleton = new spine.Skeleton(skeletonData);
-    const animationStateData = new spine.AnimationStateData(skeletonData);
-    const animationState = new spine.AnimationState(animationStateData);
-    state.skeleton = skeleton;
-    state.animationState = animationState;
+    state.layers = loadedLayers;
+    state.viewBounds = null;
+    state.skeleton = primaryLayer.skeleton;
+    state.animationState = primaryLayer.animationState;
     state.currentBundleIndex = index;
-    state.currentAnimations = skeletonData.animations;
-    const firstAnimation = requestedAnimation || (skeletonData.animations.length ? skeletonData.animations[0].name : "");
+    state.currentAnimations = primaryLayer.skeletonData.animations;
+    const firstAnimation = requestedAnimation
+      || (state.currentAnimations.length ? state.currentAnimations[0].name : "");
     fillCurrentActionSelect();
     updateBundleSelection();
     if (firstAnimation) setActiveAnimation(firstAnimation);
-    elements.bundleLabel.textContent = `${bundle.relative_directory} / ${selectSkeletonFile(bundle)}`;
+    elements.bundleLabel.textContent = entry.isScene
+      ? `${entry.relative_directory} / ${entry.layers.length} layers`
+      : `${entry.relative_directory} / ${selectSkeletonFile(primaryLayer.bundle)}`;
     // Keep the canvas visible when only some attachments are unavailable.
     // The detailed missing-texture warning is shown in the sidebar instead.
     elements.stageEmpty.hidden = true;
     elements.stageEmpty.textContent = "";
-    elements.actionSelect.disabled = skeletonData.animations.length === 0;
+    elements.actionSelect.disabled = state.currentAnimations.length === 0;
     elements.playButton.disabled = false;
     elements.resetButton.disabled = false;
-    elements.timeRange.disabled = skeletonData.animations.length === 0;
+    elements.timeRange.disabled = state.currentAnimations.length === 0;
     elements.playButton.textContent = state.playing ? "Pause" : "Play";
-    updateSummary(bundle, skeletonData);
+    updateSummary(entry);
     if (missingTextureNames.size) {
       elements.errorMessage.textContent = `Skeleton parsed, but texture data is not a browser image: ${[...missingTextureNames][0]}`;
       setStatus("Texture blocked", "status-warning");
@@ -363,6 +386,8 @@ async function loadBundle(index, requestedAnimation = "") {
     }
     updateAnimationNavigation();
   } catch (error) {
+    state.layers = [];
+    state.viewBounds = null;
     state.skeleton = null;
     state.animationState = null;
     state.trackEntry = null;
@@ -372,6 +397,56 @@ async function loadBundle(index, requestedAnimation = "") {
     showError(error);
     updateAnimationNavigation();
   }
+}
+
+async function loadSpineLayer(layerDefinition) {
+  const { bundle, role } = layerDefinition;
+  const atlasPath = bundlePath(bundle, selectAtlasFile(bundle));
+  const skeletonPath = bundlePath(bundle, selectSkeletonFile(bundle));
+  const atlasResponse = await fetch(assetUrl(atlasPath));
+  if (!atlasResponse.ok) throw new Error(`Failed to load ${atlasPath} (${atlasResponse.status})`);
+  const atlasText = await atlasResponse.text();
+  const imagePaths = bundle.image_files.map((file) => bundlePath(bundle, file));
+  const loadedImages = await Promise.all(imagePaths.map(async (path) => {
+    try {
+      return [path, await loadImage(path), null];
+    } catch (error) {
+      return [path, null, error];
+    }
+  }));
+  const imagesByName = new Map();
+  const missingTextures = new Set();
+  for (const [path, image, error] of loadedImages) {
+    if (error) {
+      missingTextures.add(path.split("/").pop());
+      continue;
+    }
+    imagesByName.set(path, image);
+    imagesByName.set(path.split("/").pop(), image);
+  }
+  const skeletonBytes = await loadBytes(skeletonPath);
+  const skeletonData = readSkeletonData(
+    atlasText,
+    skeletonBytes,
+    skeletonPath,
+    imagesByName,
+    missingTextures,
+    true,
+  );
+  const skeleton = new spine.Skeleton(skeletonData);
+  const animationStateData = new spine.AnimationStateData(skeletonData);
+  return {
+    bundle,
+    role,
+    skeletonData,
+    skeleton,
+    animationState: new spine.AnimationState(animationStateData),
+    trackEntry: null,
+    animationName: "",
+    missingTextures: new Set(
+      [...missingTextures].map((path) => path.split("/").pop()),
+    ),
+  };
 }
 
 function formatTime(seconds) {
@@ -408,7 +483,9 @@ function createAnimationListItem(entry, rowIndex) {
   source.textContent = entry.bundle.relative_directory;
   const duration = document.createElement("span");
   duration.className = "animation-item-time";
-  duration.textContent = `${entry.bundle.image_files.length} tex`;
+  duration.textContent = entry.bundle.layers.length > 1
+    ? `${entry.bundle.layers.length} layers`
+    : `${entry.bundle.image_files.length} tex`;
   button.append(name, source, duration);
   return button;
 }
@@ -452,11 +529,13 @@ function fillCurrentActionSelect() {
   }
 }
 
-function updateSummary(bundle, skeletonData) {
+function updateSummary(entry) {
+  const primaryBundle = entry.layers[entry.primaryLayerIndex].bundle;
   const values = [
-    ["Bundles", state.bundles.length],
-    ["Skeleton", selectSkeletonFile(bundle)],
-    ["Textures", bundle.image_files.length],
+    ["Animations", state.bundles.length],
+    ["Layers", entry.layers.length],
+    ["Skeleton", selectSkeletonFile(primaryBundle)],
+    ["Textures", entry.image_files.length],
   ];
   elements.assetSummary.replaceChildren(...values.map(([label, value]) => {
     const row = document.createElement("div");
@@ -517,7 +596,9 @@ async function navigateAnimation(direction) {
 
 function updateTimeline() {
   const trackTime = state.trackEntry?.trackTime ?? 0;
-  const visibleTime = Math.min(Math.max(trackTime, 0), state.duration);
+  const visibleTime = elements.loopToggle.checked && state.duration > 0
+    ? Math.max(trackTime, 0) % state.duration
+    : Math.min(Math.max(trackTime, 0), state.duration);
   elements.timeRange.max = String(Math.max(state.duration, 0.001));
   elements.timeRange.value = String(visibleTime);
   elements.timeValue.textContent = formatTime(visibleTime);
@@ -527,22 +608,125 @@ function updateTimeline() {
 }
 
 function setActiveAnimation(name) {
-  if (!state.animationState || !state.skeleton) return;
+  if (!state.layers.length || !state.skeleton) return;
   const animation = state.skeleton.data.animations.find((item) => item.name === name);
   if (!animation) return;
   state.animationName = name;
   state.animationData = animation;
-  state.duration = animation.duration;
-  state.skeleton.setToSetupPose();
-  state.trackEntry = state.animationState.setAnimation(0, name, elements.loopToggle.checked);
+  state.duration = 0;
+  state.trackEntry = null;
+  const currentEntry = state.bundles[state.currentBundleIndex];
+  for (const [index, layer] of state.layers.entries()) {
+    const layerAnimation = selectLayerAnimation(
+      layer,
+      name,
+      index === currentEntry.primaryLayerIndex,
+    );
+    layer.skeleton.setToSetupPose();
+    if (!layerAnimation) {
+      layer.trackEntry = null;
+      layer.animationName = "";
+      continue;
+    }
+    layer.animationName = layerAnimation.name;
+    layer.trackEntry = layer.animationState.setAnimation(
+      0,
+      layerAnimation.name,
+      elements.loopToggle.checked,
+    );
+    state.duration = Math.max(state.duration, layerAnimation.duration);
+    if (index === currentEntry.primaryLayerIndex) {
+      state.trackEntry = layer.trackEntry;
+    }
+  }
+  state.viewBounds = calculateStableViewBounds();
+  state.lastTime = performance.now();
   updateBundleSelection();
   updateTimeline();
 }
 
+function selectLayerAnimation(layer, requestedName, isPrimary) {
+  const animations = layer.skeletonData.animations;
+  if (!animations.length) return null;
+  const exact = animations.find((animation) => animation.name === requestedName);
+  if (exact || isPrimary) return exact ?? animations[0];
+  if (layer.role === "background") {
+    if (/show/i.test(requestedName)) {
+      const showAnimation = animations.find((animation) => /bgshow|show/i.test(animation.name));
+      if (showAnimation) return showAnimation;
+    }
+    const backgroundAnimation = animations.find((animation) => /^bg$/i.test(animation.name));
+    if (backgroundAnimation) return backgroundAnimation;
+  }
+  return animations[0];
+}
+
+function currentSkeletonBounds() {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const layer of state.layers) {
+    const boundsOffset = new spine.Vector2();
+    const boundsSize = new spine.Vector2();
+    layer.skeleton.getBounds(boundsOffset, boundsSize);
+    minX = Math.min(minX, boundsOffset.x);
+    minY = Math.min(minY, boundsOffset.y);
+    maxX = Math.max(maxX, boundsOffset.x + boundsSize.x);
+    maxY = Math.max(maxY, boundsOffset.y + boundsSize.y);
+  }
+  if (![minX, minY, maxX, maxY].every(Number.isFinite)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function calculateStableViewBounds() {
+  if (!state.layers.length) return null;
+  const sampleCount = Math.min(40, Math.max(2, Math.ceil(state.duration * 8)));
+  let stableBounds = null;
+  for (let sample = 0; sample <= sampleCount; sample += 1) {
+    const sampleTime = state.duration * sample / sampleCount;
+    for (const layer of state.layers) {
+      layer.skeleton.setToSetupPose();
+      if (layer.trackEntry) {
+        const animation = layer.skeletonData.animations.find(
+          (item) => item.name === layer.animationName,
+        );
+        const animationDuration = animation?.duration ?? 0;
+        layer.trackEntry.trackTime = elements.loopToggle.checked && animationDuration > 0
+          ? sampleTime % animationDuration
+          : Math.min(sampleTime, animationDuration);
+        layer.animationState.apply(layer.skeleton);
+      }
+      layer.skeleton.updateWorldTransform();
+    }
+    const sampleBounds = currentSkeletonBounds();
+    if (!sampleBounds) continue;
+    if (!stableBounds) {
+      stableBounds = { ...sampleBounds };
+      continue;
+    }
+    stableBounds.minX = Math.min(stableBounds.minX, sampleBounds.minX);
+    stableBounds.minY = Math.min(stableBounds.minY, sampleBounds.minY);
+    stableBounds.maxX = Math.max(stableBounds.maxX, sampleBounds.maxX);
+    stableBounds.maxY = Math.max(stableBounds.maxY, sampleBounds.maxY);
+  }
+  for (const layer of state.layers) {
+    layer.skeleton.setToSetupPose();
+    if (layer.trackEntry) {
+      layer.trackEntry.trackTime = 0;
+      layer.animationState.apply(layer.skeleton);
+    }
+    layer.skeleton.updateWorldTransform();
+  }
+  return stableBounds ?? currentSkeletonBounds();
+}
+
 function applyCurrentPose() {
-  if (!state.animationState || !state.skeleton) return;
-  state.animationState.apply(state.skeleton);
-  state.skeleton.updateWorldTransform();
+  if (!state.layers.length) return;
+  for (const layer of state.layers) {
+    layer.animationState.apply(layer.skeleton);
+    layer.skeleton.updateWorldTransform();
+  }
   drawSkeleton();
   updateTimeline();
 }
@@ -580,17 +764,19 @@ function drawSkeleton() {
   gl.viewport(0, 0, elements.canvas.width, elements.canvas.height);
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
-  if (!state.skeleton) return;
+  if (!state.layers.length) return;
 
-  const boundsOffset = new spine.Vector2();
-  const boundsSize = new spine.Vector2();
-  state.skeleton.getBounds(boundsOffset, boundsSize);
+  const bounds = state.viewBounds ?? currentSkeletonBounds();
+  if (!bounds) return;
+  const { minX, minY, maxX, maxY } = bounds;
+  const boundsWidth = Math.max(maxX - minX, 1);
+  const boundsHeight = Math.max(maxY - minY, 1);
   const scale = Math.min(
-    elements.canvas.width / Math.max(boundsSize.x, 1),
-    elements.canvas.height / Math.max(boundsSize.y, 1),
+    elements.canvas.width / boundsWidth,
+    elements.canvas.height / boundsHeight,
   ) * 0.78 * state.scale;
-  const boundsCenterX = boundsOffset.x + boundsSize.x / 2;
-  const boundsCenterY = boundsOffset.y + boundsSize.y / 2;
+  const boundsCenterX = minX + boundsWidth / 2;
+  const boundsCenterY = minY + boundsHeight / 2;
 
   gl.useProgram(renderer.program);
   gl.enable(gl.BLEND);
@@ -600,12 +786,19 @@ function drawSkeleton() {
   gl.activeTexture(gl.TEXTURE0);
   gl.uniform1i(renderer.samplerLocation, 0);
 
-  for (const slot of state.skeleton.drawOrder) {
+  for (const layer of state.layers) {
+    drawSkeletonLayer(layer.skeleton, boundsCenterX, boundsCenterY, scale);
+  }
+}
+
+function drawSkeletonLayer(skeleton, boundsCenterX, boundsCenterY, scale) {
+  for (const slot of skeleton.drawOrder) {
     const attachment = slot.getAttachment();
     if (attachment instanceof spine.RegionAttachment) {
       const vertices = new Float32Array(8);
       attachment.computeWorldVertices(slot.bone, vertices, 0, 2);
       drawTexturedAttachment(
+        skeleton,
         slot,
         attachment,
         vertices,
@@ -619,6 +812,7 @@ function drawSkeleton() {
       const vertices = new Float32Array(attachment.worldVerticesLength);
       attachment.computeWorldVertices(slot, 0, attachment.worldVerticesLength, vertices, 0, 2);
       drawTexturedAttachment(
+        skeleton,
         slot,
         attachment,
         vertices,
@@ -633,6 +827,7 @@ function drawSkeleton() {
 }
 
 function drawTexturedAttachment(
+  skeleton,
   slot,
   attachment,
   worldVertices,
@@ -669,7 +864,7 @@ function drawTexturedAttachment(
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(triangles), gl.DYNAMIC_DRAW);
   gl.bindTexture(gl.TEXTURE_2D, getWebGLTexture(image));
 
-  const skeletonColor = state.skeleton.color;
+  const skeletonColor = skeleton.color;
   const alpha = skeletonColor.a * slot.color.a * attachment.color.a;
   gl.uniform4f(
     renderer.colorLocation,
@@ -684,10 +879,12 @@ function drawTexturedAttachment(
 function frame(now) {
   const delta = Math.min((now - state.lastTime) / 1000, 0.1);
   state.lastTime = now;
-  if (state.skeleton && state.animationState && state.playing) {
-    state.animationState.update(delta * state.speed);
-    state.animationState.apply(state.skeleton);
-    state.skeleton.updateWorldTransform();
+  if (state.layers.length && state.playing) {
+    for (const layer of state.layers) {
+      layer.animationState.update(delta * state.speed);
+      layer.animationState.apply(layer.skeleton);
+      layer.skeleton.updateWorldTransform();
+    }
     drawSkeleton();
   } else {
     drawSkeleton();
@@ -740,7 +937,10 @@ elements.resetButton.addEventListener("click", () => {
 });
 elements.timeRange.addEventListener("input", () => {
   if (!state.trackEntry) return;
-  state.trackEntry.trackTime = Number(elements.timeRange.value);
+  const trackTime = Number(elements.timeRange.value);
+  for (const layer of state.layers) {
+    if (layer.trackEntry) layer.trackEntry.trackTime = trackTime;
+  }
   applyCurrentPose();
 });
 elements.speedRange.addEventListener("input", () => {
@@ -761,8 +961,8 @@ async function bootstrap() {
     const response = await fetch("/spine-index.json");
     if (!response.ok) throw new Error(`Spine index not found (${response.status})`);
     state.manifest = await response.json();
-    state.bundles = state.manifest.bundles.filter((bundle) => bundle.atlas_files.length && bundle.skeleton_files.length && bundle.image_files.length);
-    if (!state.bundles.length) throw new Error("No complete Spine bundles found in the extracted output");
+    state.bundles = buildPlayerEntries(state.manifest);
+    if (!state.bundles.length) throw new Error("No complete Spine animations found in the extracted output");
     fillBundleList();
     await loadBundle(0);
   } catch (error) {

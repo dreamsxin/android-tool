@@ -115,6 +115,45 @@ def test_spine_index_lists_each_skeleton_pair_separately(tmp_path: Path) -> None
     assert all(len(entry["atlas_files"]) == 1 for entry in index["bundles"])
 
 
+def test_spine_index_builds_explicit_multi_layer_scenes(tmp_path: Path) -> None:
+    package_name = "com.example.demo"
+    source_base = tmp_path / "exports"
+    output_base = tmp_path / "spine_exports"
+    resource_root = source_base / package_name / "data" / "files" / "obb" / "res" / "common"
+
+    character = resource_root / "knight_spine" / "1001"
+    for name in ("1001", "1001_bg"):
+        _write_file(character / f"{name}.atlas", f"{name}.png\nsize: 64,64\n".encode())
+        _write_file(character / f"{name}.skel")
+        _write_file(character / f"{name}.png")
+
+    for name in ("card_bg", "card_boom", "card_fg"):
+        layer = resource_root / "effect_spine" / name
+        _write_file(layer / f"{name}.atlas", f"{name}.png\nsize: 64,64\n".encode())
+        _write_file(layer / f"{name}.skel")
+        _write_file(layer / f"{name}.png")
+
+    result = extract_spine_bundles(
+        package_name,
+        source_base=source_base,
+        output_base=output_base,
+    )
+
+    index = json.loads((result.output_directory / "spine-index.json").read_text())
+    assert index["version"] == 2
+    assert index["scene_count"] == 2
+    scenes = {scene["name"]: scene for scene in index["scenes"]}
+    assert [layer["role"] for layer in scenes["1001"]["layers"]] == [
+        "background",
+        "main",
+    ]
+    assert [layer["role"] for layer in scenes["card"]["layers"]] == [
+        "background",
+        "effect",
+        "foreground",
+    ]
+
+
 def test_upgrade_skeleton_reuses_matching_obb_atlas(tmp_path: Path) -> None:
     package_name = "com.example.demo"
     source_base = tmp_path / "exports"

@@ -22,6 +22,16 @@ class SpineExtractError(RuntimeError):
 
 SKELETON_EXTENSIONS = (".skel", ".json", ".bytes")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+SCENE_LAYER_SUFFIXES = (
+    ("_background", "background", 0),
+    ("_back", "background", 0),
+    ("_bg", "background", 0),
+    ("_effect", "effect", 1),
+    ("_boom", "effect", 1),
+    ("_foreground", "foreground", 2),
+    ("_front", "foreground", 2),
+    ("_fg", "foreground", 2),
+)
 
 
 @dataclass(frozen=True)
@@ -333,6 +343,112 @@ def _build_spine_index_entries(
     return [{"id": index, **entry} for index, entry in enumerate(entries)]
 
 
+def _scene_layer_name(name: str) -> tuple[str, str, int] | None:
+    folded_name = name.casefold()
+    for suffix, role, order in SCENE_LAYER_SUFFIXES:
+        if folded_name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)], role, order
+    return None
+
+
+def _build_spine_scene_entries(
+    entries: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Build conservative multi-skeleton scenes from explicit layer suffixes."""
+    by_directory: dict[str, dict[str, dict[str, object]]] = {}
+    for entry in entries:
+        directory = str(entry["relative_directory"])
+        by_directory.setdefault(directory, {})[str(entry["name"]).casefold()] = entry
+
+    scenes: list[dict[str, object]] = []
+    used_layer_sets: set[tuple[int, ...]] = set()
+
+    # Character portrait resources keep the main skeleton and its background
+    # skeleton in the same directory as <name> and <name>_bg.
+    for directory, named_entries in by_directory.items():
+        for main_entry in named_entries.values():
+            main_name = str(main_entry["name"])
+            if _scene_layer_name(main_name) is not None:
+                continue
+            layer_entries: list[tuple[int, str, dict[str, object]]] = []
+            for suffix, role, order in SCENE_LAYER_SUFFIXES:
+                layer_entry = named_entries.get(f"{main_name}{suffix}".casefold())
+                if layer_entry is not None:
+                    layer_entries.append((order, role, layer_entry))
+            if not any(role == "background" for _, role, _ in layer_entries):
+                continue
+            layers = [
+                {"bundle_id": int(entry["id"]), "role": role}
+                for order, role, entry in sorted(layer_entries, key=lambda item: item[0])
+                if order == 0
+            ]
+            layers.append({"bundle_id": int(main_entry["id"]), "role": "main"})
+            layers.extend(
+                {"bundle_id": int(entry["id"]), "role": role}
+                for order, role, entry in sorted(layer_entries, key=lambda item: item[0])
+                if order > 0
+            )
+            layer_ids = tuple(int(layer["bundle_id"]) for layer in layers)
+            used_layer_sets.add(tuple(sorted(layer_ids)))
+            scenes.append(
+                {
+                    "name": main_name,
+                    "relative_directory": directory,
+                    "primary_bundle_id": int(main_entry["id"]),
+                    "layers": layers,
+                }
+            )
+
+    # Some UI scenes keep each layer in its own sibling directory, for example
+    # eff_ui_birthdaycard_bg, eff_ui_birthdaycard_boom and ..._fg.
+    layer_families: dict[tuple[str, str], list[tuple[int, str, dict[str, object]]]] = {}
+    for entry in entries:
+        name = str(entry["name"])
+        layer_name = _scene_layer_name(name)
+        if layer_name is None:
+            continue
+        family_name, role, order = layer_name
+        directory = PurePosixPath(str(entry["relative_directory"]))
+        key = (directory.parent.as_posix(), family_name.casefold())
+        layer_families.setdefault(key, []).append((order, role, entry))
+
+    for (parent_directory, _), family_layers in layer_families.items():
+        roles = {role for _, role, _ in family_layers}
+        if len(roles) < 2:
+            continue
+        ordered_layers = sorted(
+            family_layers,
+            key=lambda item: (item[0], str(item[2]["name"]).casefold()),
+        )
+        layer_ids = tuple(sorted(int(entry["id"]) for _, _, entry in ordered_layers))
+        if layer_ids in used_layer_sets:
+            continue
+        primary = next(
+            (entry for _, role, entry in ordered_layers if role == "effect"),
+            ordered_layers[-1][2],
+        )
+        family_name = _scene_layer_name(str(ordered_layers[0][2]["name"]))[0]
+        scenes.append(
+            {
+                "name": family_name,
+                "relative_directory": parent_directory,
+                "primary_bundle_id": int(primary["id"]),
+                "layers": [
+                    {"bundle_id": int(entry["id"]), "role": role}
+                    for _, role, entry in ordered_layers
+                ],
+            }
+        )
+
+    scenes.sort(
+        key=lambda scene: (
+            str(scene["relative_directory"]).casefold(),
+            str(scene["name"]).casefold(),
+        )
+    )
+    return [{"id": index, **scene} for index, scene in enumerate(scenes)]
+
+
 def _is_apk_entry(entry: dict[str, object]) -> bool:
     parts = PurePosixPath(str(entry["relative_directory"])).parts
     return bool(parts) and parts[0].casefold() == "apk"
@@ -442,6 +558,7 @@ def extract_spine_bundles(
             "APK index entries are omitted when the same logical skeleton exists in OBB or upgrade data.",
             "Only atlas files, matching skeletons, and atlas-referenced texture pages are copied.",
             "Referenced UF 00 02 textures are decoded to standard PNG files during extraction.",
+            "Explicit background, main, effect, and foreground skeletons are indexed as layered scenes.",
         ],
     }
     (output_directory / "spine-manifest.json").write_text(
@@ -449,11 +566,14 @@ def extract_spine_bundles(
         encoding="utf-8",
     )
     index_entries = _build_spine_index_entries(output_directory, completed_bundles)
+    scene_entries = _build_spine_scene_entries(index_entries)
     index = {
-        "version": 1,
+        "version": 2,
         "package_name": package_name,
         "bundle_count": len(index_entries),
+        "scene_count": len(scene_entries),
         "bundles": index_entries,
+        "scenes": scene_entries,
     }
     (output_directory / "spine-index.json").write_text(
         json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"

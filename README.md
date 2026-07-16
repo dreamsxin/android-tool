@@ -115,6 +115,8 @@ android-tool spine-extract com.yoozoo.jgame.global
 `spine-manifest.json` 方便审计，同时生成 `spine-index.json` 供播放器快速列出动画目录。
 同目录存在多套 skeleton 时，索引会分别列出每套动画；`upgrade` 只有新骨骼文件时，会
 自动复用同逻辑路径下的 `obb` atlas 和贴图。
+索引还会识别 `<name> + <name>_bg` 以及明确的 `_bg/_boom/_fg` 资源家族，并记录为
+背景、主体、效果、前景有序组合场景。
 `apk/assets/res` 中的基础 Spine 资源也会提取；播放器索引按 `apk < obb < upgrade` 处理
 同路径资源，避免 APK 内旧版本覆盖更新数据。
 
@@ -129,8 +131,9 @@ npm install --ignore-scripts
 npm run dev
 ```
 
-播放器读取上面的 `spine-index.json`，左侧直接列出所有动画目录；点击目录后加载其中的
-skeleton、贴图和动作，可切换动作、循环状态、时间轴、速度和显示缩放。
+播放器读取上面的 `spine-index.json`，左侧直接列出所有动画目录；组合场景只显示一个
+条目并按背景到前景的顺序加载多套 skeleton，底部动作仍以主体动画为准。播放器支持
+切换动作、循环状态、时间轴、速度和显示缩放。
 原始 PVR 贴图标记为预乘 Alpha，播放器使用对应的 WebGL 混合方式，避免半透明区域
 颜色偏暗。
 `spine-extract` 会自动将 atlas 引用的 `UF 00 02` 贴图转换为标准 PNG，因此 Spine 播放器
