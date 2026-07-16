@@ -102,6 +102,65 @@ def test_extract_spine_bundles_resolves_legacy_encoded_texture_names(
     assert index["bundles"][0]["image_files"] == ["DemoTexture.png"]
 
 
+def test_extract_spine_bundles_restores_app_export_path_map_names(
+    tmp_path: Path,
+) -> None:
+    package_name = "com.example.demo"
+    source_base = tmp_path / "exports"
+    output_base = tmp_path / "spine_exports"
+    package_root = source_base / package_name
+    bundle = package_root / "data" / "files" / "%44efault" / "%48ero"
+    _write_file(bundle / "%48ero.atlas", b"Hero.png\nsize: 64,64\n")
+    _write_file(bundle / "%48ero.skel")
+    _write_file(bundle / "%48ero.png")
+    _write_file(
+        package_root / "export-manifest.json",
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "kind": "private-data",
+                        "remote_path": "/data/user/0/com.example.demo/files",
+                        "local_path": "data/files",
+                    }
+                ]
+            }
+        ).encode(),
+    )
+    path_map_entries = [
+        {
+            "kind": "private-data",
+            "remote_root": "/data/user/0/com.example.demo/files",
+            "original_member": f"Default/Hero/Hero.{extension}",
+            "local_member": f"%44efault/%48ero/%48ero.{extension}",
+        }
+        for extension in ("atlas", "skel", "png")
+    ]
+    _write_file(
+        package_root / "metadata" / "path-map.json",
+        json.dumps(path_map_entries).encode(),
+    )
+
+    result = extract_spine_bundles(
+        package_name,
+        source_base=source_base,
+        output_base=output_base,
+    )
+
+    extracted = result.output_directory / "data" / "files" / "Default" / "Hero"
+    assert result.bundles[0].relative_directory == "data/files/Default/Hero"
+    assert result.bundles[0].atlas_files == ["Hero.atlas"]
+    assert result.bundles[0].skeleton_files == ["Hero.skel"]
+    assert result.bundles[0].image_files == ["Hero.png"]
+    assert (extracted / "Hero.atlas").is_file()
+    assert (extracted / "Hero.skel").is_file()
+    assert (extracted / "Hero.png").is_file()
+    assert not (result.output_directory / "data" / "files" / "%44efault").exists()
+    index = json.loads((result.output_directory / "spine-index.json").read_text())
+    assert index["bundles"][0]["relative_directory"] == "data/files/Default/Hero"
+    assert index["bundles"][0]["name"] == "Hero"
+
+
 def test_extract_spine_bundles_requires_overwrite_for_existing_output(tmp_path: Path) -> None:
     package_name = "com.example.demo"
     source_base = tmp_path / "exports"

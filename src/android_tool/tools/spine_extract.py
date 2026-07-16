@@ -11,8 +11,9 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from threading import Lock
 
-from android_tool.tools.app_export import validate_package_name
+from android_tool.tools.app_export import _portable_path_components, validate_package_name
 from android_tool.tools.uf_extract import UfExtractError, decode_uf_texture_to_png
 
 
@@ -80,6 +81,168 @@ def _is_relative_to(path: Path, other: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _join_posix_path(*paths: str) -> PurePosixPath:
+    parts: list[str] = []
+    for path in paths:
+        if not path:
+            continue
+        parts.extend(part for part in PurePosixPath(path).parts if part not in ("", "."))
+    return PurePosixPath(*parts)
+
+
+def _relative_posix_path(child: PurePosixPath, parent: PurePosixPath) -> PurePosixPath:
+    if child.parts[: len(parent.parts)] != parent.parts:
+        raise SpineExtractError(f"{child.as_posix()} is not under {parent.as_posix()}")
+    remaining = child.parts[len(parent.parts) :]
+    return PurePosixPath(*remaining)
+
+
+def _local_path(relative_path: PurePosixPath) -> Path:
+    return Path(*relative_path.parts)
+
+
+class _ExportPathMap:
+    """Translate app-export local paths back to their original device names."""
+
+    def __init__(self, local_to_original: dict[str, str]) -> None:
+        self._local_to_original = local_to_original
+
+    @classmethod
+    def load(cls, source_directory: Path) -> "_ExportPathMap":
+        path_map_path = source_directory / "metadata" / "path-map.json"
+        if not path_map_path.is_file():
+            return cls({})
+
+        root_by_source = cls._load_manifest_roots(source_directory)
+        try:
+            path_mappings = json.loads(path_map_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SpineExtractError(f"could not read export path map: {path_map_path}") from exc
+        if not isinstance(path_mappings, list):
+            raise SpineExtractError(f"invalid export path map: {path_map_path}")
+
+        local_to_original: dict[str, str] = {}
+        for mapping in path_mappings:
+            if not isinstance(mapping, dict):
+                continue
+            local_member = mapping.get("local_member")
+            original_member = mapping.get("original_member")
+            if not isinstance(local_member, str) or not isinstance(original_member, str):
+                continue
+            root = root_by_source.get(
+                (
+                    str(mapping.get("kind", "")),
+                    str(mapping.get("remote_root", "")),
+                ),
+                "",
+            )
+            local_path = _join_posix_path(root, local_member)
+            original_path = _join_posix_path(root, original_member)
+            cls._add_prefix_mappings(local_to_original, local_path, original_path)
+        return cls(local_to_original)
+
+    @staticmethod
+    def _load_manifest_roots(source_directory: Path) -> dict[tuple[str, str], str]:
+        manifest_path = source_directory / "export-manifest.json"
+        if not manifest_path.is_file():
+            return {}
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SpineExtractError(f"could not read export manifest: {manifest_path}") from exc
+        entries = manifest.get("entries") if isinstance(manifest, dict) else None
+        if not isinstance(entries, list):
+            return {}
+
+        roots: dict[tuple[str, str], str] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            remote_path = entry.get("remote_path")
+            local_path = entry.get("local_path")
+            if (
+                isinstance(kind, str)
+                and isinstance(remote_path, str)
+                and isinstance(local_path, str)
+            ):
+                roots[(kind, remote_path)] = local_path
+        return roots
+
+    @staticmethod
+    def _add_prefix_mappings(
+        local_to_original: dict[str, str],
+        local_path: PurePosixPath,
+        original_path: PurePosixPath,
+    ) -> None:
+        if len(local_path.parts) != len(original_path.parts):
+            return
+        for index in range(1, len(local_path.parts) + 1):
+            local_prefix = PurePosixPath(*local_path.parts[:index]).as_posix()
+            original_prefix = PurePosixPath(*original_path.parts[:index]).as_posix()
+            local_to_original.setdefault(local_prefix, original_prefix)
+
+    def original_for(self, local_relative_path: PurePosixPath) -> PurePosixPath:
+        local_key = local_relative_path.as_posix()
+        if local_key in self._local_to_original:
+            return PurePosixPath(self._local_to_original[local_key])
+
+        for index in range(len(local_relative_path.parts) - 1, 0, -1):
+            local_prefix = PurePosixPath(*local_relative_path.parts[:index]).as_posix()
+            original_prefix = self._local_to_original.get(local_prefix)
+            if original_prefix is None:
+                continue
+            return _join_posix_path(
+                original_prefix,
+                PurePosixPath(*local_relative_path.parts[index:]).as_posix(),
+            )
+        return local_relative_path
+
+
+class _OutputPathResolver:
+    """Choose output paths, restoring original names when app-export recorded them."""
+
+    def __init__(self, source_directory: Path) -> None:
+        self._source_directory = source_directory
+        self._path_map = _ExportPathMap.load(source_directory)
+        self._lock = Lock()
+        self._used_names_by_parent: dict[tuple[str, ...], set[str]] = {}
+        self._exact_names_by_parent: dict[tuple[str, ...], dict[str, str]] = {}
+        self._logical_to_output: dict[str, str] = {}
+
+    def output_relative_path(self, source_path: Path) -> PurePosixPath:
+        local_relative_path = PurePosixPath(
+            source_path.relative_to(self._source_directory).as_posix()
+        )
+        logical_path = self._path_map.original_for(local_relative_path)
+        if logical_path == local_relative_path:
+            return local_relative_path
+        return self.output_relative_path_for_logical(logical_path)
+
+    def output_relative_path_for_logical(self, logical_path: PurePosixPath) -> PurePosixPath:
+        key = logical_path.as_posix()
+        with self._lock:
+            output_path = self._logical_to_output.get(key)
+            if output_path is None:
+                portable_parts = _portable_path_components(
+                    list(logical_path.parts),
+                    self._used_names_by_parent,
+                    self._exact_names_by_parent,
+                )
+                output_path = PurePosixPath(*portable_parts).as_posix()
+                self._logical_to_output[key] = output_path
+        return PurePosixPath(output_path)
+
+    def output_name_for_source_path(self, source_path: Path) -> str:
+        local_relative_path = PurePosixPath(
+            source_path.relative_to(self._source_directory).as_posix()
+        )
+        logical_path = self._path_map.original_for(local_relative_path)
+        if logical_path == local_relative_path:
+            return source_path.name
+        return self.output_relative_path_for_logical(logical_path).name
 
 
 def discover_spine_bundle_directories(
@@ -201,17 +364,31 @@ def _extract_one_bundle(
     source_directory: Path,
     output_directory: Path,
     bundle_directory: Path,
+    output_paths: _OutputPathResolver,
 ) -> SpineBundle:
-    relative_directory = bundle_directory.relative_to(source_directory)
-    target_directory = output_directory / relative_directory
+    relative_directory = output_paths.output_relative_path(bundle_directory)
+    target_directory = output_directory / _local_path(relative_directory)
     target_directory.parent.mkdir(parents=True, exist_ok=True)
     atlas_files, skeleton_files, image_sources, file_count = _bundle_file_lists(
         bundle_directory
     )
-    for relative_file in sorted(set(atlas_files + skeleton_files)):
+    output_atlas_files: list[str] = []
+    output_skeleton_files: list[str] = []
+    for relative_file in atlas_files:
         source_file = bundle_directory / Path(relative_file)
-        target_file = target_directory / Path(relative_file)
-        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_relative = output_paths.output_relative_path(source_file)
+        output_atlas_files.append(
+            _relative_posix_path(target_relative, relative_directory).as_posix()
+        )
+        target_file = output_directory / _local_path(target_relative)
+        _copy_spine_file(source_file, target_file, False)
+    for relative_file in skeleton_files:
+        source_file = bundle_directory / Path(relative_file)
+        target_relative = output_paths.output_relative_path(source_file)
+        output_skeleton_files.append(
+            _relative_posix_path(target_relative, relative_directory).as_posix()
+        )
+        target_file = output_directory / _local_path(target_relative)
         _copy_spine_file(source_file, target_file, False)
     for relative_file, source_file in sorted(image_sources.items()):
         target_file = target_directory / Path(relative_file)
@@ -219,8 +396,8 @@ def _extract_one_bundle(
     image_files = sorted(image_sources)
     return SpineBundle(
         relative_directory=relative_directory.as_posix(),
-        atlas_files=atlas_files,
-        skeleton_files=skeleton_files,
+        atlas_files=sorted(output_atlas_files),
+        skeleton_files=sorted(output_skeleton_files),
         image_files=image_files,
         file_count=file_count,
     )
@@ -327,12 +504,18 @@ def _extract_overlay_bundle(
     output_directory: Path,
     skeleton_path: Path,
     fallback_atlas: Path,
+    output_paths: _OutputPathResolver,
 ) -> SpineBundle:
-    relative_directory = skeleton_path.parent.relative_to(source_directory)
-    target_directory = output_directory / relative_directory
+    relative_directory = output_paths.output_relative_path(skeleton_path.parent)
+    target_directory = output_directory / _local_path(relative_directory)
     target_directory.mkdir(parents=True, exist_ok=True)
-    target_skeleton = target_directory / skeleton_path.name
-    target_atlas = target_directory / fallback_atlas.name
+    target_skeleton_relative = output_paths.output_relative_path(skeleton_path)
+    target_skeleton_file = _relative_posix_path(
+        target_skeleton_relative, relative_directory
+    ).as_posix()
+    target_skeleton = output_directory / _local_path(target_skeleton_relative)
+    target_atlas_file = output_paths.output_name_for_source_path(fallback_atlas)
+    target_atlas = target_directory / target_atlas_file
     _copy_spine_file(skeleton_path, target_skeleton, False)
     _copy_spine_file(fallback_atlas, target_atlas, False)
 
@@ -351,8 +534,8 @@ def _extract_overlay_bundle(
     image_files = sorted(set(image_files))
     return SpineBundle(
         relative_directory=relative_directory.as_posix(),
-        atlas_files=[fallback_atlas.name],
-        skeleton_files=[skeleton_path.name],
+        atlas_files=[target_atlas_file],
+        skeleton_files=[target_skeleton_file],
         image_files=image_files,
         file_count=2 + len(image_files),
     )
@@ -363,12 +546,18 @@ def _extract_atlas_overlay_bundle(
     output_directory: Path,
     atlas_path: Path,
     fallback_skeleton: Path,
+    output_paths: _OutputPathResolver,
 ) -> SpineBundle:
-    relative_directory = atlas_path.parent.relative_to(source_directory)
-    target_directory = output_directory / relative_directory
+    relative_directory = output_paths.output_relative_path(atlas_path.parent)
+    target_directory = output_directory / _local_path(relative_directory)
     target_directory.mkdir(parents=True, exist_ok=True)
-    target_atlas = target_directory / atlas_path.name
-    target_skeleton = target_directory / fallback_skeleton.name
+    target_atlas_relative = output_paths.output_relative_path(atlas_path)
+    target_atlas_file = _relative_posix_path(
+        target_atlas_relative, relative_directory
+    ).as_posix()
+    target_atlas = output_directory / _local_path(target_atlas_relative)
+    target_skeleton_file = output_paths.output_name_for_source_path(fallback_skeleton)
+    target_skeleton = target_directory / target_skeleton_file
     _copy_spine_file(atlas_path, target_atlas, False)
     _copy_spine_file(fallback_skeleton, target_skeleton, False)
 
@@ -387,8 +576,8 @@ def _extract_atlas_overlay_bundle(
     image_files = sorted(set(image_files))
     return SpineBundle(
         relative_directory=relative_directory.as_posix(),
-        atlas_files=[atlas_path.name],
-        skeleton_files=[fallback_skeleton.name],
+        atlas_files=[target_atlas_file],
+        skeleton_files=[target_skeleton_file],
         image_files=image_files,
         file_count=2 + len(image_files),
     )
@@ -605,6 +794,7 @@ def extract_spine_bundles(
     if not bundle_directories and not overlay_skeletons and not overlay_atlases:
         raise SpineExtractError(f"no Spine bundles found in {source_directory}")
 
+    output_paths = _OutputPathResolver(source_directory)
     total_bundle_count = (
         len(bundle_directories) + len(overlay_skeletons) + len(overlay_atlases)
     )
@@ -620,6 +810,7 @@ def extract_spine_bundles(
                 source_directory,
                 output_directory,
                 bundle_directory,
+                output_paths,
             )
             futures[future] = (index, bundle_directory)
         overlay_offset = len(bundle_directories)
@@ -630,6 +821,7 @@ def extract_spine_bundles(
                 output_directory,
                 skeleton_path,
                 fallback_atlas,
+                output_paths,
             )
             futures[future] = (overlay_offset + overlay_index, skeleton_path.parent)
         atlas_overlay_offset = overlay_offset + len(overlay_skeletons)
@@ -640,6 +832,7 @@ def extract_spine_bundles(
                 output_directory,
                 atlas_path,
                 fallback_skeleton,
+                output_paths,
             )
             futures[future] = (
                 atlas_overlay_offset + overlay_index,
