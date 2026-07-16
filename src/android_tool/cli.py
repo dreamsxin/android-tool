@@ -19,6 +19,7 @@ from android_tool.tools.apk_install import ApkInstallError, install_apks, uninst
 from android_tool.tools.emulator_probe import ProbeOptions, probe_emulators
 from android_tool.tools.spine_extract import SpineExtractError, extract_spine_bundles
 from android_tool.tools.uf_extract import UfExtractError, extract_uf_resources
+from android_tool.tools.video_extract import VideoExtractError, extract_video_resources
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -113,6 +114,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Suppress scan and copy progress and only print the final result.",
     )
     spine_extract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    video_extract = subparsers.add_parser(
+        "video-extract",
+        help="Extract video containers from an app-export result.",
+    )
+    video_extract.add_argument("package", help="Android package name already exported under --source.")
+    video_extract.add_argument(
+        "--source",
+        default="exports",
+        help="Parent directory containing the package export.",
+    )
+    video_extract.add_argument(
+        "--output",
+        default="video_exports",
+        help="Parent output directory; a package-named directory is created inside it.",
+    )
+    video_extract.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing package output directory.",
+    )
+    video_extract.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress copy progress and only print the final result.",
+    )
+    video_extract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     uf_extract = subparsers.add_parser(
         "uf-extract",
@@ -406,6 +434,48 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Extracted Spine bundles for {result.package_name}")
         print(f"Output: {result.output_directory}")
         print(f"Bundles: {result.bundle_count}, files: {result.file_count}")
+        return 0
+
+    if args.command == "video-extract":
+        def report_video_progress(
+            current: int, total: int, copied_bytes: int, current_path: Path
+        ) -> None:
+            if current == 0:
+                print(
+                    f"Scanning video resources under {current_path} ...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
+            percent = int(current * 100 / total) if total else 0
+            print(
+                f"Copying video {current:,}/{total:,} ({percent}%); "
+                f"copied={copied_bytes / 1024 / 1024:.1f} MiB; current={current_path}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        try:
+            result = extract_video_resources(
+                package_name=args.package,
+                source_base=args.source,
+                output_base=args.output,
+                overwrite=args.overwrite,
+                progress_callback=None if args.quiet else report_video_progress,
+            )
+        except (VideoExtractError, OSError) as exc:
+            parser.exit(2, f"error: {exc}\n")
+
+        if args.json:
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            return 0
+
+        print(f"Extracted video resources for {result.package_name}")
+        print(f"Output: {result.output_directory}")
+        print(
+            f"Resources: {result.resource_count}, logical videos: {result.logical_count}, "
+            f"bytes: {result.total_bytes}"
+        )
         return 0
 
     if args.command == "uf-extract":

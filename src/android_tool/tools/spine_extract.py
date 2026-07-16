@@ -231,6 +231,32 @@ def _fallback_obb_atlas(
     return candidate if candidate.is_file() else None
 
 
+def _fallback_base_skeleton(
+    source_directory: Path,
+    atlas_path: Path,
+) -> Path | None:
+    relative_path = atlas_path.relative_to(source_directory)
+    parts = list(relative_path.parts)
+    try:
+        upgrade_index = next(
+            index for index, part in enumerate(parts) if part.casefold() == "upgrade"
+        )
+    except StopIteration:
+        return None
+    logical_parts = parts[upgrade_index + 1 :]
+    prefix_parts = parts[:upgrade_index]
+    for base_parts in (
+        [*prefix_parts, "obb", *logical_parts],
+        ["apk", "assets", *logical_parts],
+    ):
+        base_path = source_directory / Path(*base_parts)
+        for extension in SKELETON_EXTENSIONS:
+            candidate = base_path.with_suffix(extension)
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def _discover_upgrade_overlay_skeletons(
     source_directory: Path,
 ) -> list[tuple[Path, Path]]:
@@ -247,6 +273,24 @@ def _discover_upgrade_overlay_skeletons(
             fallback_atlas = _fallback_obb_atlas(source_directory, skeleton_path)
             if fallback_atlas is not None:
                 overlays.append((skeleton_path, fallback_atlas))
+    return sorted(overlays, key=lambda item: item[0].as_posix().casefold())
+
+
+def _discover_upgrade_overlay_atlases(
+    source_directory: Path,
+) -> list[tuple[Path, Path]]:
+    overlays: list[tuple[Path, Path]] = []
+    for root, _, filenames in os.walk(source_directory):
+        root_path = Path(root)
+        for filename in filenames:
+            atlas_path = root_path / filename
+            if atlas_path.suffix.casefold() != ".atlas":
+                continue
+            if _has_matching_skeleton(atlas_path):
+                continue
+            fallback_skeleton = _fallback_base_skeleton(source_directory, atlas_path)
+            if fallback_skeleton is not None:
+                overlays.append((atlas_path, fallback_skeleton))
     return sorted(overlays, key=lambda item: item[0].as_posix().casefold())
 
 
@@ -281,6 +325,42 @@ def _extract_overlay_bundle(
         relative_directory=relative_directory.as_posix(),
         atlas_files=[fallback_atlas.name],
         skeleton_files=[skeleton_path.name],
+        image_files=image_files,
+        file_count=2 + len(image_files),
+    )
+
+
+def _extract_atlas_overlay_bundle(
+    source_directory: Path,
+    output_directory: Path,
+    atlas_path: Path,
+    fallback_skeleton: Path,
+) -> SpineBundle:
+    relative_directory = atlas_path.parent.relative_to(source_directory)
+    target_directory = output_directory / relative_directory
+    target_directory.mkdir(parents=True, exist_ok=True)
+    target_atlas = target_directory / atlas_path.name
+    target_skeleton = target_directory / fallback_skeleton.name
+    _copy_spine_file(atlas_path, target_atlas, False)
+    _copy_spine_file(fallback_skeleton, target_skeleton, False)
+
+    image_files: list[str] = []
+    for page_name in _atlas_page_names(atlas_path):
+        source_image = (atlas_path.parent / page_name).resolve()
+        if not _is_relative_to(source_image, atlas_path.parent.resolve()):
+            continue
+        if not source_image.is_file():
+            continue
+        relative_image = source_image.relative_to(atlas_path.parent.resolve())
+        target_image = target_directory / relative_image
+        _copy_spine_file(source_image, target_image, True)
+        image_files.append(relative_image.as_posix())
+
+    image_files = sorted(set(image_files))
+    return SpineBundle(
+        relative_directory=relative_directory.as_posix(),
+        atlas_files=[atlas_path.name],
+        skeleton_files=[fallback_skeleton.name],
         image_files=image_files,
         file_count=2 + len(image_files),
     )
@@ -493,10 +573,13 @@ def extract_spine_bundles(
         source_directory, progress_callback=progress_callback
     )
     overlay_skeletons = _discover_upgrade_overlay_skeletons(source_directory)
-    if not bundle_directories and not overlay_skeletons:
+    overlay_atlases = _discover_upgrade_overlay_atlases(source_directory)
+    if not bundle_directories and not overlay_skeletons and not overlay_atlases:
         raise SpineExtractError(f"no Spine bundles found in {source_directory}")
 
-    total_bundle_count = len(bundle_directories) + len(overlay_skeletons)
+    total_bundle_count = (
+        len(bundle_directories) + len(overlay_skeletons) + len(overlay_atlases)
+    )
     bundles: list[SpineBundle | None] = [None] * total_bundle_count
     last_copy_progress = time.monotonic()
     if progress_callback is not None:
@@ -521,6 +604,19 @@ def extract_spine_bundles(
                 fallback_atlas,
             )
             futures[future] = (overlay_offset + overlay_index, skeleton_path.parent)
+        atlas_overlay_offset = overlay_offset + len(overlay_skeletons)
+        for overlay_index, (atlas_path, fallback_skeleton) in enumerate(overlay_atlases):
+            future = executor.submit(
+                _extract_atlas_overlay_bundle,
+                source_directory,
+                output_directory,
+                atlas_path,
+                fallback_skeleton,
+            )
+            futures[future] = (
+                atlas_overlay_offset + overlay_index,
+                atlas_path.parent,
+            )
         completed = 0
         for future in as_completed(futures):
             index, current_path = futures[future]
@@ -555,6 +651,7 @@ def extract_spine_bundles(
             "A Spine bundle is detected by a .atlas file with a sibling .skel, .json, or .bytes file.",
             "APK assets are extracted as the base resource layer.",
             "Upgrade-only skeletons reuse atlas and texture files from the same logical OBB path.",
+            "Upgrade-only atlas and texture files reuse skeletons from the same logical OBB or APK path.",
             "APK index entries are omitted when the same logical skeleton exists in OBB or upgrade data.",
             "Only atlas files, matching skeletons, and atlas-referenced texture pages are copied.",
             "Referenced UF 00 02 textures are decoded to standard PNG files during extraction.",

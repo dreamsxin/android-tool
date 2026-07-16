@@ -206,26 +206,70 @@ WINDOWS_RESERVED_NAMES = {
     *(f"com{number}" for number in range(1, 10)),
     *(f"lpt{number}" for number in range(1, 10)),
 }
+WINDOWS_ENCODED_CHARACTERS = set('<>:"/\\|?*%')
+
+
+def _percent_encode_character(character: str) -> str:
+    return "".join(f"%{byte:02X}" for byte in character.encode("utf-8"))
 
 
 def _portable_component(component: str) -> str:
-    """Encode a device path component into a case-safe Windows filename."""
+    """Encode a device path component into a portable Windows filename."""
     encoded_parts: list[str] = []
     for character in component:
-        if "a" <= character <= "z" or "0" <= character <= "9" or character in "._-":
-            encoded_parts.append(character)
+        if ord(character) < 32 or character in WINDOWS_ENCODED_CHARACTERS:
+            encoded_parts.append(_percent_encode_character(character))
         else:
-            encoded_parts.extend(f"%{byte:02X}" for byte in character.encode("utf-8"))
+            encoded_parts.append(character)
     encoded = "".join(encoded_parts)
     if encoded.endswith("."):
         encoded = f"{encoded[:-1]}%2E"
+    if encoded.endswith(" "):
+        encoded = f"{encoded[:-1]}%20"
     if encoded.partition(".")[0].casefold() in WINDOWS_RESERVED_NAMES:
-        first = encoded[0].encode("utf-8")
-        encoded = "".join(f"%{byte:02X}" for byte in first) + encoded[1:]
+        encoded = _percent_encode_character(encoded[0]) + encoded[1:]
     if len(encoded) > 180:
         digest = hashlib.sha256(component.encode("utf-8")).hexdigest()[:16]
         encoded = f"{encoded[:150]}~{digest}"
     return encoded
+
+
+def _append_case_collision_suffix(
+    component: str, original_path: str, used_names: set[str]
+) -> str:
+    digest = hashlib.sha256(original_path.encode("utf-8")).hexdigest()[:8]
+    for attempt in range(1000):
+        suffix = f"~{digest}" if attempt == 0 else f"~{digest}-{attempt}"
+        candidate = f"{component[: 180 - len(suffix)]}{suffix}"
+        if candidate.casefold() not in used_names:
+            return candidate
+    raise AppExportError(f"could not create a unique local path for: {original_path}")
+
+
+def _portable_path_components(
+    parts: list[str],
+    used_names_by_parent: dict[tuple[str, ...], set[str]],
+    exact_names_by_parent: dict[tuple[str, ...], dict[str, str]],
+) -> list[str]:
+    portable_parts: list[str] = []
+    for index, part in enumerate(parts):
+        parent = tuple(portable_parts)
+        encoded = _portable_component(part)
+        exact_names = exact_names_by_parent.setdefault(parent, {})
+        if encoded in exact_names:
+            portable_parts.append(exact_names[encoded])
+            continue
+
+        used_names = used_names_by_parent.setdefault(parent, set())
+        selected = encoded
+        if selected.casefold() in used_names:
+            selected = _append_case_collision_suffix(
+                encoded, PurePosixPath(*parts[: index + 1]).as_posix(), used_names
+            )
+        exact_names[encoded] = selected
+        used_names.add(selected.casefold())
+        portable_parts.append(selected)
+    return portable_parts
 
 
 def _safe_extract_tar(
@@ -237,13 +281,17 @@ def _safe_extract_tar(
     path_mappings: list[dict[str, str]] = []
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
+    used_names_by_parent: dict[tuple[str, ...], set[str]] = {}
+    exact_names_by_parent: dict[tuple[str, ...], dict[str, str]] = {}
     with tarfile.open(archive_path, mode="r:*") as archive:
         for member in archive:
             relative = PurePosixPath(member.name)
             parts = [part for part in relative.parts if part not in ("", ".")]
             if relative.is_absolute() or ".." in parts:
                 raise AppExportError(f"unsafe path in device archive: {member.name}")
-            portable_parts = [_portable_component(part) for part in parts]
+            portable_parts = _portable_path_components(
+                parts, used_names_by_parent, exact_names_by_parent
+            )
             target = destination.joinpath(*portable_parts)
             portable_name = PurePosixPath(*portable_parts).as_posix()
             original_name = PurePosixPath(*parts).as_posix()

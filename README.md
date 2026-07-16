@@ -20,6 +20,7 @@
 | `app-list` | 列出已安装应用、包名和 APK 路径 | 可用 |
 | `app-export` | 按包名导出 APK、私有数据和标准外部数据 | 可用 |
 | `spine-extract` | 从导出结果中提取 Spine 动画资源 | 可用 |
+| `video-extract` | 导出 CRI USM 等视频容器并生成版本索引 | 可用 |
 | `uf-extract` | 解封 UF 00 02 资源，并将 ETC2 贴图转为 PNG | 可用 |
 | `spine-player` | 在浏览器中验证 Spine 3.8 资源和动画 | 可用 |
 | `adb-connect` | 连接、断开或检查 ADB 目标 | 可用 |
@@ -98,8 +99,9 @@ exports/com.example.demo/
 └─ export-manifest.json          # 来源、大小和导出状态
 ```
 
-私有目录需要设备 root 权限，或应用允许 `run-as`。Android 允许但 Windows 不支持的
-文件名会进行可逆编码，映射记录在 `metadata/path-map.json`。
+私有目录需要设备 root 权限，或应用允许 `run-as`。普通大小写和 Unicode 文件名会尽量
+原样保留；Android 允许但 Windows 不支持的文件名，或同级路径存在大小写冲突时，会
+进行可逆改名，映射记录在 `metadata/path-map.json`。
 
 ### 4. 提取 Spine 动画资源
 
@@ -136,6 +138,24 @@ npm run dev
 切换动作、循环状态、时间轴、速度和显示缩放。
 原始 PVR 贴图标记为预乘 Alpha，播放器使用对应的 WebGL 混合方式，避免半透明区域
 颜色偏暗。
+
+### 5. 导出视频资源
+
+从应用导出结果中复制全部视频容器：
+
+```powershell
+android-tool video-extract com.yoozoo.jgame.global --overwrite
+```
+
+默认输出到 `video_exports/com.yoozoo.jgame.global/`，保留 APK、OBB、upgrade 和语言资源
+中的原始相对路径。`video-manifest.json` 记录全部物理文件；`video-index.json` 按
+`apk < obb < upgradelang < upgrade` 选择每个逻辑路径的最新版本，同时保留所有版本路径。
+
+当前游戏视频使用以 `CRID` 开头的 CRI USM 容器。工具只做无损复制，不自动转码；这些
+文件包含 CRI 封装的复合视频流，直接用 FFmpeg 重封装可能产生损坏帧。
+
+### 6. 解封 UF 资源
+
 `spine-extract` 会自动将 atlas 引用的 `UF 00 02` 贴图转换为标准 PNG，因此 Spine 播放器
 不需要再执行 `uf-extract`。如果需要解封整个应用中的所有 UF 资源，再使用：
 

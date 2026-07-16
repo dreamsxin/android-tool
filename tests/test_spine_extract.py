@@ -182,6 +182,34 @@ def test_upgrade_skeleton_reuses_matching_obb_atlas(tmp_path: Path) -> None:
     assert any("/upgrade/" in entry["relative_directory"] for entry in index["bundles"])
 
 
+def test_upgrade_atlas_reuses_matching_obb_skeleton(tmp_path: Path) -> None:
+    package_name = "com.example.demo"
+    source_base = tmp_path / "exports"
+    output_base = tmp_path / "spine_exports"
+    package_root = source_base / package_name / "data" / "files"
+    logical_path = Path("res/common/knight_spine/1001")
+    obb_bundle = package_root / "obb" / logical_path
+    upgrade_bundle = package_root / "upgrade" / logical_path
+    _write_file(obb_bundle / "1001.atlas", b"1001.png\nsize: 64,64\n")
+    _write_file(obb_bundle / "1001.skel", b"base-skeleton")
+    _write_file(obb_bundle / "1001.png", b"base-texture")
+    _write_file(upgrade_bundle / "1001.atlas", b"1001.png\nsize: 64,64\n")
+    _write_file(upgrade_bundle / "1001.png", b"upgrade-texture")
+
+    result = extract_spine_bundles(
+        package_name,
+        source_base=source_base,
+        output_base=output_base,
+    )
+
+    extracted_upgrade = result.output_directory / "data" / "files" / "upgrade" / logical_path
+    assert (extracted_upgrade / "1001.skel").read_bytes() == b"base-skeleton"
+    assert (extracted_upgrade / "1001.atlas").is_file()
+    assert (extracted_upgrade / "1001.png").read_bytes() == b"upgrade-texture"
+    index = json.loads((result.output_directory / "spine-index.json").read_text())
+    assert any("/upgrade/" in entry["relative_directory"] for entry in index["bundles"])
+
+
 def test_apk_spine_assets_are_extracted_without_indexing_overridden_resources(
     tmp_path: Path,
 ) -> None:

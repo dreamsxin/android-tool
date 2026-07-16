@@ -30,8 +30,9 @@ python -m android_tool app-export com.example.demo `
 最终目录始终使用包名。`export-manifest.json` 记录设备、root 状态、来源路径、
 目标路径、估算大小、实际传输量及每项状态。重复导出需要显式添加 `--overwrite`。
 
-Android 允许但 Windows 禁止的文件名字符会进行可逆百分号编码。例如 `:` 会写成
-`%3A`；完整对应关系保存在 `metadata/path-map.json`。
+普通大小写和 Unicode 文件名会尽量原样保留。Android 允许但 Windows 禁止的文件名
+字符会进行可逆百分号编码，例如 `:` 会写成 `%3A`；同级路径存在大小写冲突时会追加
+短哈希后缀。完整对应关系保存在 `metadata/path-map.json`。
 
 应用也可能把文件写入无法从路径可靠归属的公共目录，工具不会把这些共享文件
 自动计入，以免混入其他应用或用户数据。

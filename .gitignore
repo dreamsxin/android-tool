@@ -5,6 +5,7 @@ __pycache__/
 exports/
 spine_exports/
 uf_exports/
+video_exports/
 node_modules/
 spine-extract.*.log
 spine-player.*.log
